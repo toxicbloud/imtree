@@ -5,7 +5,7 @@ MCTS, minimax, décisions et états/actions. Namespace `ImGuiTreeGraph`.
 
 ## Compilation et démo
 
-Prérequis : CMake ≥ 3.24, Git, compilateur C++20 et pilote OpenGL.
+Prérequis : CMake ≥ 3.24, Git, compilateur C++20 et pilote OpenGL ≥ 3.2.
 CPM.cmake est téléchargé automatiquement (empreinte SHA-256 vérifiée), puis
 récupère Dear ImGui **v1.91.9b** et GLFW **3.4**. Il n’est pas nécessaire
 d’installer ces deux bibliothèques séparément. La première configuration

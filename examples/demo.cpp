@@ -44,16 +44,12 @@ int main(int argc, char** argv) {
     }
     glfwSetErrorCallback(ErrorCallback);
     if (!glfwInit()) return 1;
-#ifdef __APPLE__
     const char* glsl = "#version 150";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#else
-    const char* glsl = "#version 130";
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
     GLFWwindow* window = glfwCreateWindow(1440, 900, "imgui_tree_graph - MCTS", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }

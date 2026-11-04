@@ -1,0 +1,48 @@
+name: C++20
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Linux graphics prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev xvfb xauth
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build --config Debug --parallel 2
+      - name: Tests
+        run: ctest --test-dir build -C Debug --output-on-failure
+      - name: Headless OpenGL demo
+        if: runner.os == 'Linux'
+        run: xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 ./build/imgui_tree_graph_demo --frames 5
+      - name: Install
+        run: cmake --install build --config Debug --prefix install
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          -DIMGUI_TREE_GRAPH_BUILD_DEMO=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure

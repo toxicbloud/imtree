@@ -1,0 +1,9 @@
+/build*/
+/cmake-build-*/
+/.cache/
+/.cpm/
+/.idea/
+/.vscode/
+/.DS_Store
+/imgui.ini
+*.user

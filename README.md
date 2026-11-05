@@ -1,41 +1,83 @@
 # imgui_tree_graph
 
-Bibliothèque C++20 de visualisation d’arbres de recherche pour Dear ImGui :
-MCTS, minimax, décisions et états/actions. Namespace `ImGuiTreeGraph`.
+[![CI](https://github.com/toxicbloud/imtree/actions/workflows/ci.yml/badge.svg)](https://github.com/toxicbloud/imtree/actions/workflows/ci.yml)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20.html)
+[![CMake](https://img.shields.io/badge/CMake-3.24%2B-064F8C?logo=cmake&logoColor=white)](https://cmake.org/)
+[![Linux · Windows · macOS](https://img.shields.io/badge/plateformes-Linux%20%7C%20Windows%20%7C%20macOS-52606D)](https://github.com/toxicbloud/imtree/actions/workflows/ci.yml)
 
-## Compilation et démo
+**Visualisez et explorez des arbres de décision directement dans Dear ImGui.**
+`imgui_tree_graph` transforme un arbre de recherche en vue interactive : états,
+actions, probabilités et métriques restent lisibles même sur de grands arbres.
 
-Prérequis : CMake ≥ 3.24, Git, compilateur C++20 et pilote OpenGL ≥ 3.2.
-CPM.cmake est téléchargé automatiquement (empreinte SHA-256 vérifiée), puis
-récupère Dear ImGui **v1.91.9b** et GLFW **3.4**. Il n’est pas nécessaire
-d’installer ces deux bibliothèques séparément. La première configuration
-nécessite Internet ; `CPM_SOURCE_CACHE` permet de partager le cache.
+![Illustration d’un arbre de recherche avec états, actions et probabilités](docs/tree-search-illustration.svg)
 
-Sous Debian/Ubuntu, les dépendances **système** de GLFW/OpenGL restent nécessaires :
+## Ce que vous pouvez faire
+
+- Parcourir des arbres de recherche de gauche à droite, avec des états ronds et des actions rectangulaires.
+- Déplacer la vue, zoomer sur une zone et replier les branches qui ne vous intéressent pas.
+- Garder une vue d’ensemble grâce à la mini-carte et au cadrage automatique.
+- Afficher des informations sur les nœuds et les transitions, comme le nombre de visites, la valeur ou la probabilité.
+- Intégrer le rendu à une application Dear ImGui existante.
+
+## Essayer la démo
+
+Il faut CMake 3.24 ou plus récent, un compilateur C++20 et une connexion Internet
+pour la première configuration. Dear ImGui et GLFW sont téléchargés automatiquement.
+
+### macOS
+
+Installez les outils en ligne de commande Xcode (`xcode-select --install`), puis CMake
+(par exemple avec `brew install cmake`). La démo utilise OpenGL 3.2, disponible sur macOS.
+
+### Ubuntu et Debian
 
 ```sh
 sudo apt-get install cmake g++ git libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+```
+
+### Windows
+
+Utilisez Visual Studio 2022 avec les outils de développement C++ et CMake.
+
+### Construire et lancer
+
+Sur macOS, Linux et Windows, depuis la racine du dépôt :
+
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
-./build/imgui_tree_graph_demo
 ```
 
-Sous Windows : Visual Studio 2022 avec les outils C++, mêmes commandes CMake,
-puis `build/Release/imgui_tree_graph_demo.exe`. Sous macOS : Xcode Command Line
-Tools ; la démo utilise un contexte OpenGL 3.2 core.
+Lancez ensuite la démo :
 
-La démo génère un arbre de neuf niveaux, avec états ronds, actions rectangulaires,
-alternance des joueurs, nœuds chance, métriques et probabilités.
+```sh
+# macOS et Linux
+./build/imgui_tree_graph_demo
 
-- Glisser avec le bouton droit **ou central** : déplacement.
-- Molette : zoom centré sur le curseur, même dans une fenêtre ImGui déplacée.
-- Clic gauche sur un nœud : repliage/dépliage, sans réinitialiser la caméra.
-- Clic/glisser dans la mini-map : recentrage de la caméra.
-- Boutons « Fit entire tree » et « Root (1:1) » : vue globale ou détaillée.
-- `--frames 5` : test de démarrage borné, utilisable avec Xvfb.
+# Windows
+build\Release\imgui_tree_graph_demo.exe
+```
 
-## Intégration
+La démo affiche un arbre de recherche à neuf niveaux. Pour l’explorer :
+
+| Action | Commande |
+| --- | --- |
+| Déplacer l’arbre | Glisser avec le bouton droit ou central |
+| Zoomer ou dézoomer | Molette, centrée sur le curseur |
+| Déplier ou replier une branche | Clic gauche sur un nœud |
+| Recentrer la vue | Cliquer-glisser dans la mini-carte |
+| Voir tout l’arbre | Bouton « Fit entire tree » |
+| Revenir à la racine | Bouton « Root (1:1) » |
+
+## Intégrer à votre application
+
+La bibliothèque fournit le calcul du layout et le rendu ImGui. La démo GLFW/OpenGL
+est facultative : elle peut être désactivée si votre application possède déjà sa
+propre fenêtre et son backend Dear ImGui.
+
+<details>
+<summary>Exemple CMake et C++</summary>
 
 ```cmake
 set(IMGUI_TREE_GRAPH_BUILD_DEMO OFF CACHE BOOL "" FORCE)
@@ -85,16 +127,31 @@ canvas) et zoom. `fit_to_tree` ajuste la caméra aux dimensions disponibles.
 `fill_color == 0` sélectionne la palette J1/J2/chance ; toute autre couleur
 `ImU32` remplace cette palette.
 
-## Architecture et performances
+</details>
 
-```text
-include/imgui_tree_graph/BuchheimLayout.hpp  modèle et API du layout
-include/imgui_tree_graph/TreeRenderer.hpp    caméra, options et API du canvas
-src/BuchheimLayout.cpp                      Buchheim–Jünger–Schulz
-src/TreeRenderer.cpp                        rendu ImDrawList et interactions
-examples/demo.cpp                          GLFW + OpenGL3
-tests/                                    régressions layout et rendu
+## Qualité et compatibilité
+
+La compilation et les tests sont vérifiés automatiquement sur **Linux, Windows et
+macOS**. Sous Linux, la CI démarre également la démo sans écran avec Xvfb/Mesa et
+exécute les tests avec AddressSanitizer/UBSan.
+
+## Plus de détails
+
+<details>
+<summary>Installation, architecture et performances</summary>
+
+Installer la bibliothèque après compilation :
+
+```sh
+cmake --install build --prefix /your/prefix
 ```
+
+L’installation fournit les en-têtes, la bibliothèque et l’export
+`lib/cmake/imgui_tree_graph/imgui_tree_graphTargets.cmake`. Les consommateurs de
+cet export doivent fournir les includes et le linkage de leur propre Dear ImGui,
+compilé avec une configuration ABI compatible (notamment `imconfig.h`). Pour
+construire la démo avec une cible ImGui externe, renseigner également
+`IMGUI_TREE_GRAPH_IMGUI_SOURCE_DIR` vers les sources correspondantes.
 
 Le layout implémente les deux parcours de Buchheim, Jünger et Schulz (2002),
 les contours avec fils virtuels et l’accumulation `shift/change` :
@@ -122,19 +179,4 @@ si aucune de ces conditions n’est remplie, pour éviter les débordements sur 
 grandes mini-maps. Le zoom minimal par défaut (`0.00001`) permet de cadrer les
 arbres très larges ; une limite personnalisée plus élevée peut empêcher ce cadrage.
 
-## Tests, CI et installation
-
-Les tests sont autonomes (sans framework externe). La CI compile sous Linux,
-Windows et macOS, lance les tests, vérifie l’installation et démarre la démo
-Linux sous Xvfb/Mesa. Un job Linux utilise AddressSanitizer/UBSan.
-
-```sh
-cmake --install build --prefix /your/prefix
-```
-
-L’installation fournit les en-têtes, la bibliothèque et l’export
-`lib/cmake/imgui_tree_graph/imgui_tree_graphTargets.cmake`. Les consommateurs de
-cet export doivent fournir les includes et le linkage de leur propre Dear ImGui,
-compilé avec une configuration ABI compatible (notamment `imconfig.h`).
-Pour construire la démo avec une cible ImGui externe, renseigner également
-`IMGUI_TREE_GRAPH_IMGUI_SOURCE_DIR` vers les sources correspondantes.
+</details>

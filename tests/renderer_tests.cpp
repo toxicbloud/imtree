@@ -4,6 +4,22 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <new>
+#include <limits>
+#include <vector>
+
+namespace { std::size_t cpp_allocations = 0; }
+
+void* operator new(std::size_t size) {
+    ++cpp_allocations;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 using namespace ImGuiTreeGraph;
@@ -32,7 +48,7 @@ struct FrameResult {
 };
 
 FrameResult Frame(TreeRenderer& renderer, BuchheimNode* root,
-                  const LayoutConfig& layout, const RendererConfig& config) {
+                  const LayoutConfig& layout, const RendererConfig& config, float bottom_clip = 0) {
     ImGui::NewFrame();
     ImGui::SetNextWindowPos({80, 60});
     ImGui::SetNextWindowSize({640, 480});
@@ -41,11 +57,395 @@ FrameResult Frame(TreeRenderer& renderer, BuchheimNode* root,
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
     const int before = ImGui::GetWindowDrawList()->VtxBuffer.Size;
+    if (bottom_clip > 0)
+        ImGui::GetWindowDrawList()->PushClipRect(origin,
+            {origin.x + size.x, origin.y + size.y - bottom_clip}, true);
     const bool changed = renderer.render("tree", root, layout, config);
+    if (bottom_clip > 0) ImGui::GetWindowDrawList()->PopClipRect();
     const int vertices = ImGui::GetWindowDrawList()->VtxBuffer.Size - before;
     ImGui::End();
     ImGui::Render();
     return {origin, size, vertices, changed};
+}
+
+struct ColorProbe {
+    int calls[3]{};
+};
+
+ImU32 CustomColor(const BuchheimNode& node, void* data) {
+    auto& probe = *static_cast<ColorProbe*>(data);
+    Check(node.id < 3, "callback receives original node");
+    ++probe.calls[node.id];
+    return IM_COL32(7, 19, 233, 255);
+}
+
+int ColorVertices(ImU32 color) {
+    int count = 0;
+    const auto* draw = ImGui::GetDrawData();
+    for (int i = 0; i < draw->CmdListsCount; ++i)
+        for (const auto& vertex : draw->CmdLists[i]->VtxBuffer)
+            if (vertex.col == color) ++count;
+    return count;
+}
+
+std::uint64_t GeometryHash() {
+    std::uint64_t hash = 1469598103934665603ULL;
+    const auto* draw = ImGui::GetDrawData();
+    for (int i = 0; i < draw->CmdListsCount; ++i)
+        for (const auto& vertex : draw->CmdLists[i]->VtxBuffer) {
+            const auto* bytes = reinterpret_cast<const unsigned char*>(&vertex);
+            for (std::size_t j = 0; j < sizeof(vertex); ++j)
+                hash = (hash ^ bytes[j]) * 1099511628211ULL;
+        }
+    return hash;
+}
+
+void TestAcceleration() {
+    LayoutConfig layout;
+    RendererConfig config;
+    config.show_grid = false;
+    config.show_minimap = false;
+    auto root = std::make_unique<BuchheimNode>();
+    std::vector<BuchheimNode*> nodes{root.get()};
+    for (std::size_t i = 0; i < 32767; ++i)
+        for (int j = 0; j < 2; ++j)
+            nodes.push_back(&nodes[i]->add_child(std::make_unique<BuchheimNode>()));
+    ComputeBuchheimLayout(root.get(), layout);
+    Check(root->subtree_count == 65535, "large cache must count every visible node");
+    TreeRenderer renderer;
+    auto& io = ImGui::GetIO();
+    renderer.camera() = {{-100000000, -100000000}, 0.1f};
+    auto frame = Frame(renderer, root.get(), layout, config);
+    io.AddMousePosEvent(frame.origin.x + 200, frame.origin.y + 100);
+    frame = Frame(renderer, root.get(), layout, config);
+    const auto skipped = renderer.stats();
+    Check(skipped.main_nodes_visited == 1 && skipped.main_edges_visited == 1 &&
+          skipped.hit_nodes_visited == 1 && skipped.main_subtrees_culled == 1 &&
+          skipped.edge_subtrees_culled == 1 && !renderer.interaction().hovered,
+          "offscreen 65k subtree must skip nodes, edges and hits at its root");
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().main_nodes_visited == skipped.main_nodes_visited &&
+          renderer.stats().main_edges_visited == skipped.main_edges_visited &&
+          renderer.stats().hit_nodes_visited == skipped.hit_nodes_visited,
+          "traversal statistics are deterministic across identical frames");
+    const auto hash = GeometryHash();
+    config.subtree_culling = false;
+    config.cluster_pixels = 0;
+    Frame(renderer, root.get(), layout, config);
+    Check(GeometryHash() == hash && renderer.stats().main_nodes_visited == 65535 &&
+          renderer.stats().main_edges_visited == 65535 && renderer.stats().hit_nodes_visited == 65535,
+          "disabled pruning/LOD preserves offscreen geometry with full traversal");
+    config.subtree_culling = true;
+    config.cluster_pixels = 3;
+    renderer.fit_to_tree(root.get(), frame.size, layout);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().main_clusters > 0 && renderer.stats().main_nodes_visited < 10000 &&
+          renderer.stats().main_edges_visited < 10000, "automatic fit-space LOD skips dense subtrees");
+    const auto fit_stats = renderer.stats();
+    config.cluster_pixels = 0;
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().main_clusters == 0 && renderer.stats().main_nodes_visited == 65535,
+          "main clustering disabled independently");
+    config.show_minimap = true;
+    renderer.camera() = {{-100000000, -100000000}, 1};
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().minimap_clusters > 0 && renderer.stats().minimap_nodes_visited < 10000 &&
+          renderer.stats().main_clusters == 0, "minimap clusters independently at readable main zoom");
+    std::printf("65535-node traversal: offscreen nodes/edges/hits=%zu/%zu/%zu; "
+                "fit nodes/edges=%zu/%zu clusters=%zu; minimap nodes=%zu clusters=%zu\n",
+                skipped.main_nodes_visited, skipped.main_edges_visited, skipped.hit_nodes_visited,
+                fit_stats.main_nodes_visited, fit_stats.main_edges_visited, fit_stats.main_clusters,
+                renderer.stats().minimap_nodes_visited, renderer.stats().minimap_clusters);
+    config.minimap_cluster_pixels = 0;
+    Frame(renderer, root.get(), layout, config, 130);
+    const auto clipped_hash = GeometryHash();
+    Check(renderer.stats().minimap_nodes_visited == 1 &&
+          renderer.stats().minimap_subtrees_culled == 1,
+          "partially clipped minimap prunes an absent 65k subtree at the root");
+    config.subtree_culling = false;
+    Frame(renderer, root.get(), layout, config, 130);
+    Check(GeometryHash() == clipped_hash && renderer.stats().minimap_nodes_visited == 65535,
+          "minimap subtree pruning preserves disabled-mode clipped geometry");
+    config.subtree_culling = true;
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().minimap_clusters == 0 && renderer.stats().minimap_nodes_visited == 65535,
+          "unclustered minimap retains the full 16-bit vertex-offset path");
+    config.cluster_pixels = 3;
+    config.minimap_cluster_pixels = 2;
+    renderer.camera() = {{260, 100}, 0.00001f};
+    // Force the entire projected tree into one representative for exact hit tests.
+    config.cluster_pixels = 100;
+    config.show_minimap = false;
+    io.AddMousePosEvent(frame.origin.x + 260, frame.origin.y + 100);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.stats().main_nodes_visited == 1 && renderer.stats().main_edges_visited == 1 &&
+          renderer.stats().main_clusters == 1 && renderer.stats().hit_nodes_visited == 1 &&
+          renderer.interaction().hovered == root.get() &&
+          renderer.interaction().hovered_hidden_count == 65534,
+          "cluster hit exposes representative and hidden count");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Check(!Frame(renderer, root.get(), layout, config).changed && !root->collapsed &&
+          renderer.interaction().clicked == root.get() &&
+          renderer.interaction().clicked_hidden_count == 65534,
+          "automatic cluster clicks must not mutate explicit collapse");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    config.show_minimap = true;
+    for (int i = 0; i < 4; ++i) Frame(renderer, root.get(), layout, config);
+    const auto cpp_before = cpp_allocations, imgui_before = allocations;
+    for (int i = 0; i < 3; ++i) Frame(renderer, root.get(), layout, config);
+    Check(cpp_before == cpp_allocations && imgui_before == allocations,
+          "clustered main/hit/minimap steady state must not allocate");
+    root->collapsed = true;
+    ComputeBuchheimLayout(root.get(), layout);
+    Frame(renderer, root.get(), layout, config);
+    Check(root->subtree_count == 1 && renderer.stats().main_clusters == 0 &&
+          renderer.stats().minimap_nodes_visited == 1, "relayout refreshes collapsed caches");
+    root->collapsed = false;
+    ComputeBuchheimLayout(root.get(), layout);
+    Frame(renderer, root.get(), layout, config);
+    Check(root->subtree_count == 65535 && renderer.stats().main_clusters == 1,
+          "expansion restores caches and automatic clustering");
+    Frame(renderer, nullptr, layout, config);
+    Check(renderer.stats().main_nodes_visited == 0 && renderer.stats().main_clusters == 0,
+          "null render resets statistics");
+    io.AddMousePosEvent(-100, -100);
+}
+
+void TestConservativeVisuals() {
+    auto root = std::make_unique<BuchheimNode>();
+    auto& child = root->add_child(std::make_unique<BuchheimNode>());
+    LayoutConfig layout;
+    layout.level_height = 2000;
+    ComputeBuchheimLayout(root.get(), layout);
+    RendererConfig config;
+    config.show_minimap = config.show_grid = false;
+    config.cluster_pixels = 0;
+    TreeRenderer renderer;
+    // Both endpoints lie outside, but the incoming curve crosses the viewport.
+    renderer.camera() = {{260, -800}, 1};
+    const auto empty = Frame(renderer, nullptr, layout, config);
+    const auto crossing = Frame(renderer, root.get(), layout, config);
+    Check(crossing.vertices > empty.vertices, "crossing incoming edge cannot be pruned with node bounds");
+    auto compare = [&] {
+        config.subtree_culling = false;
+        const auto plain = Frame(renderer, root.get(), layout, config);
+        const auto hash = GeometryHash();
+        config.subtree_culling = true;
+        const auto pruned = Frame(renderer, root.get(), layout, config);
+        Check(plain.vertices == pruned.vertices && hash == GeometryHash(),
+              "culling must preserve exact conservative visual geometry");
+        return pruned.vertices;
+    };
+    compare();
+    layout.level_height = 4000;
+    ComputeBuchheimLayout(root.get(), layout);
+    renderer.camera() = {{260, -400}, 0.25f};
+    Check(compare() > empty.vertices && renderer.stats().main_nodes_visited == 2,
+          "low-zoom pruned edge pass retains crossing incoming line");
+    config.detail_zoom = 0.1f;
+    Check(compare() > empty.vertices, "crossing Bezier control hull remains conservative");
+    config.detail_zoom = 0.3f;
+    layout.level_height = 2000;
+    ComputeBuchheimLayout(root.get(), layout);
+    renderer.camera() = {{260, -800}, 1};
+    renderer.camera().pan.x = -1000;
+    Check(compare() == empty.vertices, "offscreen narrow incoming edge submits nothing");
+    child.edge_from_parent.label.assign(500, 'W');
+    Check(compare() > empty.vertices, "live long badge can be visible with edge and endpoints offscreen");
+    child.edge_from_parent.label.assign(800, 'M');
+    Check(compare() > empty.vertices, "long badge edits require no relayout or cache refresh");
+    child.edge_from_parent.label.assign(60, 'W');
+    renderer.camera().pan.x = -300;
+    Check(compare() == empty.vertices, "small-font badge stays offscreen");
+    auto& io = ImGui::GetIO();
+    io.FontDefault = io.Fonts->Fonts[1];
+    Check(compare() > empty.vertices, "font changes immediately reveal uncached badge extents");
+    io.FontDefault = io.Fonts->Fonts[0];
+    child.edge_from_parent.label.clear();
+    renderer.camera() = {{-400, -200}, 0.25f};
+    child.edge_from_parent.thickness = 4000;
+    RefreshTreeVisualBounds(root.get());
+    Check(root->subtree_edge_thickness == 4000 && compare() > empty.vertices,
+          "visual-only thickness refresh preserves thick offscreen crossing strokes");
+    child.edge_from_parent.thickness = 1;
+    RefreshTreeVisualBounds(root.get());
+    Check(root->subtree_edge_thickness == 1, "visual refresh shrinks obsolete stroke bound");
+    root->shape = NodeShape::RoundedRectangle;
+    layout.node_width = 4000;
+    renderer.camera().pan.y = 100;
+    Check(compare() > empty.vertices, "live shapes and dimensions remain conservative without relayout");
+}
+
+void TestLocalStrokeBounds() {
+    BuchheimNode root;
+    auto& thick = root.add_child(std::make_unique<BuchheimNode>());
+    auto& dense = root.add_child(std::make_unique<BuchheimNode>());
+    for (int i = 0; i < 3; ++i) dense.add_child(std::make_unique<BuchheimNode>());
+    auto* tail = &root.add_child(std::make_unique<BuchheimNode>());
+    for (int i = 0; i < 512; ++i)
+        tail = &tail->add_child(std::make_unique<BuchheimNode>());
+    LayoutConfig layout;
+    layout.level_height = 10000;
+    thick.edge_from_parent.thickness = 1.0e9f;
+    // Transparent edges emit no geometry even for the nonfinite-bound case.
+    thick.edge_from_parent.color = 0;
+    ComputeBuchheimLayout(&root, layout);
+    RendererConfig config;
+    config.show_grid = config.show_minimap = false;
+    config.cluster_pixels = 30;
+    TreeRenderer renderer;
+    renderer.camera() = {{260, 100}, 0.001f};
+    auto frame = Frame(renderer, &root, layout, config);
+    auto& io = ImGui::GetIO();
+    io.AddMousePosEvent(frame.origin.x + 260 + dense.x * 0.001f,
+                        frame.origin.y + 100 + dense.y * 0.001f);
+    auto verify = [&] {
+        Frame(renderer, &root, layout, config);
+        Check(dense.subtree_edge_thickness == 1 && renderer.stats().main_clusters == 1 &&
+              renderer.stats().main_edges_visited < 100 &&
+              renderer.stats().edge_subtrees_culled > 0 &&
+              renderer.interaction().hovered == &dense &&
+              renderer.interaction().hovered_hidden_count == 3,
+              "unrelated wide/nonfinite edge cannot block local clustering, hit LOD, or pruning");
+    };
+    verify();
+    thick.edge_from_parent.thickness = std::numeric_limits<float>::infinity();
+    RefreshTreeVisualBounds(&root);
+    Check(std::isinf(root.subtree_edge_thickness), "nonfinite bound propagates only through ancestors");
+    verify();
+    io.AddMousePosEvent(-100, -100);
+}
+
+void TestNewAPI() {
+    auto& io = ImGui::GetIO();
+    LayoutConfig layout;
+    RendererConfig config;
+    config.show_grid = false;
+    config.show_minimap = false;
+    TreeRenderer renderer;
+    auto root = std::make_unique<BuchheimNode>("root");
+    root->children.push_back(std::make_unique<BuchheimNode>("leaf"));
+    root->children.push_back(std::make_unique<BuchheimNode>("leaf"));
+    renderer.camera().pan = {260, 100};
+    Frame(renderer, root.get(), layout, config);
+    const auto frame = Frame(renderer, root.get(), layout, config);
+    Check(root->has_layout() && root->children[1]->parent == root.get() &&
+          root->children[1]->number == 2 && root->children[1]->y == layout.level_height,
+          "render must lazily layout legacy fresh trees");
+
+    auto fresh = std::make_unique<BuchheimNode>();
+    auto* tip = fresh.get();
+    for (int i = 0; i < 100000; ++i)
+        tip = &tip->add_child(std::make_unique<BuchheimNode>());
+    renderer.fit_to_tree(fresh.get(), frame.size, layout);
+    Check(fresh->has_layout() && tip->y == 100000.0f * layout.level_height,
+          "mutable fit must lazily layout deep fresh trees");
+    Check(fresh->subtree_count == 100001 && fresh->subtree_min.y == 0 &&
+          fresh->subtree_max.y == tip->y, "deep-tree caches are reduced without recursion");
+    Frame(renderer, fresh.get(), layout, config);
+    for (int i = 0; i < 4; ++i) Frame(renderer, fresh.get(), layout, config);
+    const auto deep_cpp_before = cpp_allocations, deep_imgui_before = allocations;
+    Frame(renderer, fresh.get(), layout, config);
+    Check(deep_cpp_before == cpp_allocations && deep_imgui_before == allocations,
+          "deep-tree traversal must remain allocation-free after warmup");
+    renderer.fit_to_tree(nullptr, frame.size);
+    Check(std::isfinite(renderer.camera().pan.x), "null fit overload must be unambiguous");
+    auto const_fresh = std::make_unique<BuchheimNode>();
+    const_fresh->children.push_back(std::make_unique<BuchheimNode>());
+    const_fresh->children.front()->x = 400;
+    renderer.fit_to_tree(static_cast<const BuchheimNode*>(const_fresh.get()), frame.size, layout);
+    Check(!const_fresh->has_layout() && const_fresh->children.front()->parent == nullptr &&
+          const_fresh->children.front()->x == 400 && renderer.camera().zoom > 0,
+          "const fresh fit must not mutate topology or coordinates");
+
+    renderer.camera() = {{260, 100}, 1};
+    config.collapse_on_click = false;
+    io.AddMousePosEvent(frame.origin.x + 260, frame.origin.y + 100);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().hovered == root.get() && !renderer.interaction().clicked,
+          "hover events include nonclicked nodes");
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Check(!Frame(renderer, root.get(), layout, config).changed && !root->collapsed,
+          "collapse can be disabled independently of clicks");
+    const auto event = renderer.interaction();
+    Check(event.clicked == root.get() && event.mouse_button == ImGuiMouseButton_Left &&
+          event.ctrl && Near(event.world_position.x, 0) && Near(event.world_position.y, 0) &&
+          Near(event.screen_position.x, frame.origin.x + 260), "rich click event");
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().clicked, "click events reset on the next render");
+    auto* leaf = root->children.front().get();
+    io.AddMousePosEvent(frame.origin.x + 260 + leaf->x, frame.origin.y + 100 + leaf->y);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Right, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf &&
+          renderer.interaction().mouse_button == ImGuiMouseButton_Right,
+          "leaf and right-button clicks are reported");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Right, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf && !leaf->collapsed,
+          "left-clicking a leaf reports selection without changing layout");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf && renderer.interaction().double_clicked,
+          "double clicks are exposed to custom inspectors");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMousePosEvent(frame.origin.x + frame.size.x - 20, frame.origin.y + frame.size.y - 20);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().hovered, "empty canvas clears hovered nodes");
+    Frame(renderer, nullptr, layout, config);
+    Check(!renderer.interaction().hovered && !renderer.interaction().clicked,
+          "null render clears interaction");
+
+    root->id = 0;
+    root->children[0]->id = 1;
+    root->children[1]->id = 2;
+    root->player_id = 0;
+    root->children[0]->player_id = 1;
+    root->children[1]->player_id = -1;
+    config.show_minimap = true;
+    Frame(renderer, root.get(), layout, config);
+    Check(ColorVertices(IM_COL32(52, 126, 190, 255)) > 0 &&
+          ColorVertices(IM_COL32(185, 71, 66, 255)) > 0 &&
+          ColorVertices(IM_COL32(95, 128, 112, 255)) > 0,
+          "default player palette remains unchanged");
+    ColorProbe probe;
+    config.node_color = CustomColor;
+    config.node_color_user_data = &probe;
+    Frame(renderer, root.get(), layout, config);
+    Check(probe.calls[0] == 2 && probe.calls[1] == 2 && probe.calls[2] == 2 &&
+          ColorVertices(IM_COL32(7, 19, 233, 255)) > 0,
+          "custom colors override every player palette on canvas and minimap");
+    probe = {};
+    root->fill_color = IM_COL32(251, 3, 91, 255);
+    Frame(renderer, root.get(), layout, config);
+    Check(probe.calls[0] == 0 && probe.calls[1] == 2 && probe.calls[2] == 2 &&
+          ColorVertices(root->fill_color) > 0, "explicit fill overrides callback in both views");
+    for (int i = 0; i < 4; ++i) Frame(renderer, root.get(), layout, config);
+    const auto before = allocations;
+    const auto cpp_before = cpp_allocations;
+    Frame(renderer, root.get(), layout, config);
+    Check(before == allocations && cpp_before == cpp_allocations,
+          "custom interaction and color rendering does not allocate");
+    const ImVec2 map_center{frame.origin.x + frame.size.x - config.minimap_margin - 100,
+                            frame.origin.y + frame.size.y - config.minimap_margin - 75};
+    io.AddMousePosEvent(map_center.x, map_center.y);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().hovered && !renderer.interaction().clicked,
+          "minimap interactions must not leak node events");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    io.AddMousePosEvent(-100, -100);
+    Frame(renderer, nullptr, layout, config);
 }
 
 } // namespace
@@ -62,7 +462,15 @@ int main() {
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     unsigned char* pixels;
     int width, height;
+    io.Fonts->AddFontDefault();
+    ImFontConfig large_font;
+    large_font.SizePixels = 26;
+    io.Fonts->AddFontDefault(&large_font);
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    TestNewAPI();
+    TestAcceleration();
+    TestConservativeVisuals();
+    TestLocalStrokeBounds();
 
     LayoutConfig layout;
     RendererConfig config;
@@ -179,15 +587,18 @@ int main() {
     auto wide = std::make_unique<BuchheimNode>();
     for (int i = 0; i < 7000; ++i) wide->children.push_back(std::make_unique<BuchheimNode>());
     const LayoutConfig default_layout;
+    config.minimap_cluster_pixels = 0;
     ComputeBuchheimLayout(wide.get(), default_layout);
     renderer.camera().pan = {-10000000, -10000000};
     const auto large_map = Frame(renderer, wide.get(), default_layout, config);
     Check(large_map.vertices > 65535, "large minimap must handle vertex-offset draw commands");
     for (int i = 0; i < 4; ++i) Frame(renderer, wide.get(), default_layout, config);
     const auto warmed_allocations = allocations;
+    const auto warmed_cpp_allocations = cpp_allocations;
     Frame(renderer, wide.get(), default_layout, config);
     Frame(renderer, wide.get(), default_layout, config);
-    Check(allocations == warmed_allocations, "steady-state rendering must not allocate");
+    Check(allocations == warmed_allocations && cpp_allocations == warmed_cpp_allocations,
+          "steady-state rendering must not allocate");
     io.BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
     Frame(renderer, root.get(), layout, config);
     ImGui::DestroyContext();

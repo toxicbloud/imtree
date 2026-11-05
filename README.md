@@ -1,140 +1,251 @@
-# imgui_tree_graph
+# imtree
 
-Bibliothèque C++20 de visualisation d’arbres de recherche pour Dear ImGui :
-MCTS, minimax, décisions et états/actions. Namespace `ImGuiTreeGraph`.
+**Explore your search trees in Dear ImGui.**
 
-## Compilation et démo
+imtree is a C++20 addon for [Dear ImGui](https://github.com/ocornut/imgui)
+that brings your algorithm's decisions into your debugging tools:
+states, actions, probabilities, and scores.
+Automatic layout handles placement; you navigate the tree and inspect what matters.
 
-Prérequis : CMake ≥ 3.24, Git, compilateur C++20 et pilote OpenGL ≥ 3.2.
-CPM.cmake est téléchargé automatiquement (empreinte SHA-256 vérifiée), puis
-récupère Dear ImGui **v1.91.9b** et GLFW **3.4**. Il n’est pas nécessaire
-d’installer ces deux bibliothèques séparément. La première configuration
-nécessite Internet ; `CPM_SOURCE_CACHE` permet de partager le cache.
+![A complete decision tree with three actions, six outcomes, and their scores](docs/images/imgui-tree-graph-demo.png)
 
-Sous Debian/Ubuntu, les dépendances **système** de GLFW/OpenGL restent nécessaires :
+*One position, three actions, six outcomes: the entire tree fits on screen.
+Edges show probabilities, and each node carries its metrics.*
+
+## From results to decisions
+
+- **Understand the search.** See visits, values, and probabilities from your
+  MCTS, minimax, or planner alongside the decisions that produced them.
+- **Keep your bearings.** Cursor-centered zoom, panning, auto-fit, and a
+  minimap help you navigate.
+- **Focus on a branch.** Collapse subtrees with a click without resetting
+  the camera.
+- **Connect your inspector.** Read the clicked or hovered node, mouse button,
+  modifiers, and canvas position.
+- **Make it yours.** Multiline labels, per-node colors or a color callback,
+  shapes, and edge badges.
+
+![A collapsed branch keeps the focus on the remaining decisions](docs/images/imgui-tree-graph-collapsed.png)
+
+*The same tree with one branch collapsed. Selection is available to your
+inspector independently of collapsing.*
+
+## Try the demo
+
+The demo includes the small tree above and a nine-level MCTS tree.
+CMake fetches Dear ImGui and GLFW automatically.
+
+**Linux / Debian / Ubuntu**
 
 ```sh
 sudo apt-get install cmake g++ git libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
 ./build/imgui_tree_graph_demo
 ```
 
-Sous Windows : Visual Studio 2022 avec les outils C++, mêmes commandes CMake,
-puis `build/Release/imgui_tree_graph_demo.exe`. Sous macOS : Xcode Command Line
-Tools ; la démo utilise un contexte OpenGL 3.2 core.
+**Windows:** use the same CMake commands with Visual Studio 2022 and its C++
+tools, then run `build/Release/imgui_tree_graph_demo.exe`.
+**macOS:** install Xcode Command Line Tools and use the same CMake commands.
 
-La démo génère un arbre de neuf niveaux, avec états ronds, actions rectangulaires,
-alternance des joueurs, nœuds chance, métriques et probabilités.
+Requirements: CMake >= 3.24, Git, C++20, and OpenGL >= 3.2 for the demo.
+The first download requires Internet access; use `CPM_SOURCE_CACHE` to
+reuse dependencies.
 
-- Glisser avec le bouton droit **ou central** : déplacement.
-- Molette : zoom centré sur le curseur, même dans une fenêtre ImGui déplacée.
-- Clic gauche sur un nœud : repliage/dépliage, sans réinitialiser la caméra.
-- Clic/glisser dans la mini-map : recentrage de la caméra.
-- Boutons « Fit entire tree » et « Root (1:1) » : vue globale ou détaillée.
-- `--frames 5` : test de démarrage borné, utilisable avec Xvfb.
+The scene selector switches between the small tree and the larger MCTS tree.
+To open a view directly:
 
-## Intégration
-
-```cmake
-set(IMGUI_TREE_GRAPH_BUILD_DEMO OFF CACHE BOOL "" FORCE)
-set(IMGUI_TREE_GRAPH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-# Facultatif : utiliser votre cible Dear ImGui existante, plutôt que CPM.
-set(IMGUI_TREE_GRAPH_IMGUI_TARGET my_imgui CACHE STRING "" FORCE)
-add_subdirectory(external/imtree)
-target_link_libraries(my_app PRIVATE ImGuiTreeGraph::imgui_tree_graph)
+```sh
+./build/imgui_tree_graph_demo --scene overview --view fit
+./build/imgui_tree_graph_demo --scene overview --view fit --collapse-first
+./build/imgui_tree_graph_demo --scene large --view root
 ```
+
+| Input | Action |
+| --- | --- |
+| Mouse wheel | Zoom around the cursor |
+| Right or middle drag | Pan |
+| Left-click a node | Select and collapse/expand |
+| Click/drag in the minimap | Recenter the view |
+| Fit entire tree | Fit the visible tree |
+| Disable Click collapses | Select without collapsing |
+
+## Your first tree
+
+Build the model once, then render it in your ImGui loop:
 
 ```cpp
 #include <imgui_tree_graph/TreeRenderer.hpp>
 
 using namespace ImGuiTreeGraph;
-auto root = std::make_unique<BuchheimNode>();
-root->primary_label = "Root";
-auto child = std::make_unique<BuchheimNode>();
-child->shape = NodeShape::RoundedRectangle;
-child->secondary_label = "N=42\nQ=0.7";
-child->edge_from_parent.label = "p=0.8";
-root->children.push_back(std::move(child));
+
+// Initialization: keep the model and renderer alive between frames.
+auto root = std::make_unique<BuchheimNode>("Position");
+auto move = std::make_unique<BuchheimNode>("Advance");
+move->shape = NodeShape::RoundedRectangle;
+move->secondary_label = "N=42\nQ=0.7";
+move->edge_from_parent.label = "p=0.8";
+root->add_child(std::move(move));
+
 LayoutConfig layout;
 ComputeBuchheimLayout(root.get(), layout);
-TreeRenderer renderer; // persistant, un par canvas
+TreeRenderer renderer;
 
-// À chaque frame, entre ImGui::Begin(...) et ImGui::End() :
-renderer.render("search", root.get(), layout);
+// Every frame:
+ImGui::Begin("Search");
+renderer.render("tree", root.get(), layout);
+if (const auto* node = renderer.interaction().hovered) {
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted(node->secondary_label.c_str());
+    ImGui::EndTooltip();
+}
+ImGui::End();
 ```
 
-Les structures possèdent les chaînes (`std::string`) et les enfants
-(`std::unique_ptr`). Les pointeurs parent, contours et indices sont non propriétaires
-et recalculés automatiquement. Un arbre est requis : les graphes avec cycles ou
-états partagés doivent être déroulés en occurrences distinctes. Les identifiants
-sont des métadonnées ; aucune unicité n’est requise pour le rendu.
+`BuchheimNode` owns its children and labels. Call `ComputeBuchheimLayout` again
+after changing the structure or layout parameters.
+Rendering a fresh tree and interactive collapsing initialize or update the
+layout automatically.
 
-Après une modification structurelle ou des paramètres de layout, appeler
-`ComputeBuchheimLayout` avant le rendu. Le repliage par le renderer le fait
-automatiquement. Conserver le modèle pendant le rendu, sans modification concurrente.
-Les dimensions sont uniformes, en unités monde ; un cercle utilise la plus petite
-dimension comme diamètre. `level_height` est la distance entre centres de niveaux :
-choisir une valeur supérieure à `node_height` pour laisser de la place aux arêtes.
-La racine est ancrée à `(0,0)`. Les bornes incluent les dimensions des nœuds visibles.
+## Integration
 
-`RendererConfig` configure la grille, la taille et les quatre coins de mini-map,
-les limites de zoom et les seuils LOD. `camera()` expose pan (pixels locaux du
-canvas) et zoom. `fit_to_tree` ajuste la caméra aux dimensions disponibles.
-`fill_color == 0` sélectionne la palette J1/J2/chance ; toute autre couleur
-`ImU32` remplace cette palette.
+The library uses Dear ImGui; GLFW and OpenGL are only needed by the demo.
+You can provide your application's existing ImGui target:
 
-## Architecture et performances
-
-```text
-include/imgui_tree_graph/BuchheimLayout.hpp  modèle et API du layout
-include/imgui_tree_graph/TreeRenderer.hpp    caméra, options et API du canvas
-src/BuchheimLayout.cpp                      Buchheim–Jünger–Schulz
-src/TreeRenderer.cpp                        rendu ImDrawList et interactions
-examples/demo.cpp                          GLFW + OpenGL3
-tests/                                    régressions layout et rendu
+```cmake
+set(IMGUI_TREE_GRAPH_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+set(IMGUI_TREE_GRAPH_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(IMGUI_TREE_GRAPH_IMGUI_TARGET my_imgui CACHE STRING "" FORCE)
+add_subdirectory(external/imtree)
+target_link_libraries(my_app PRIVATE ImGuiTreeGraph::imgui_tree_graph)
 ```
 
-Le layout implémente les deux parcours de Buchheim, Jünger et Schulz (2002),
-les contours avec fils virtuels et l’accumulation `shift/change` :
-**O(N) en temps**, sans recherche linéaire de frère ou copie de contours.
-Les recalculs réinitialisent les données temporaires.
+Without an external target, CMake fetches Dear ImGui **v1.91.9b**
+(and GLFW **3.4** for the demo).
 
-Le rendu parcourt les nœuds visibles structurellement en O(N) et ne soumet les
-primitives de nœuds/arêtes que si leurs AABB (épaisseur comprise) intersectent
-le viewport effectif. Les cartouches sont testés indépendamment. Cela ne constitue
-pas un index spatial : le parcours CPU reste linéaire, même lorsque peu de nœuds
-sont à l’écran. La mini-map possède son propre viewport.
+## API and customization
 
-La bibliothèque ne crée ni conteneur temporaire ni allocation dynamique par frame.
-Dear ImGui reste propriétaire de ses buffers de sommets/indices et peut les
-agrandir lorsqu’un nouveau maximum de géométrie est atteint ; l’absence
-d’allocations s’entend **en régime établi après préchauffage**. La création du
-modèle et des chaînes se fait hors rendu. Textes/badges disparaissent par paliers
-de zoom et les formes/arêtes sont simplifiées à faible zoom.
+| API | Purpose |
+| --- | --- |
+| `BuchheimNode::add_child` | Transfer ownership of a child and establish its parent and sibling index |
+| `LayoutConfig` | Node dimensions and level/subtree spacing |
+| `RendererConfig` | Grid, minimap, detail thresholds, and zoom limits |
+| `TreeRenderer::camera()` | Access pan and zoom |
+| `TreeRenderer::fit_to_tree()` | Fit visible nodes |
+| `TreeRenderer::interaction()` | Read hover, click, double-click, and modifiers |
+| `RendererConfig::node_color` | Provide custom colors for the canvas and minimap |
+| `TreeRenderer::stats()` | Count visited nodes, skipped subtrees, and clusters in each view |
 
-Avec les indices ImGui 16 bits par défaut, le backend doit annoncer
-`ImGuiBackendFlags_RendererHasVtxOffset` (c’est le cas du backend OpenGL3 de la
-démo). Sinon, compiler **tout** ImGui et ses consommateurs avec `ImDrawIdx`
-32 bits dans `imconfig.h`. Le canvas affiche un diagnostic et refuse le rendu
-si aucune de ces conditions n’est remplie, pour éviter les débordements sur les
-grandes mini-maps. Le zoom minimal par défaut (`0.00001`) permet de cadrer les
-arbres très larges ; une limite personnalisée plus élevée peut empêcher ce cadrage.
+A nonzero `fill_color` overrides the callback and the player 1/player 2/chance
+palette. Set `collapse_on_click = false` to reserve clicks for selection.
+Interaction pointers are borrowed and events reset each render: keep the model
+alive and do not mutate it while drawing.
 
-## Tests, CI et installation
+The headers are the API reference:
+[`BuchheimLayout.hpp`](include/imgui_tree_graph/BuchheimLayout.hpp) ·
+[`TreeRenderer.hpp`](include/imgui_tree_graph/TreeRenderer.hpp).
+The [demo](examples/demo.cpp) shows how to use them with GLFW/OpenGL3.
 
-Les tests sont autonomes (sans framework externe). La CI compile sous Linux,
-Windows et macOS, lance les tests, vérifie l’installation et démarre la démo
-Linux sous Xvfb/Mesa. Un job Linux utilise AddressSanitizer/UBSan.
+## Performance and scope
+
+Placement uses the Buchheim-Jünger-Schulz algorithm in **O(N)**.
+Rendering skips offscreen primitives and simplifies shapes, text, and badges
+as you zoom out. Once ImGui's buffers have warmed up, the renderer does not
+allocate per frame, excluding allocations in your own callback.
+
+Layout also prepares hierarchical bounds: the renderer can skip an offscreen
+subtree without visiting all its descendants. When zoomed out, subtrees with
+a very small projected footprint become clusters. This is purely visual and
+does not change their `collapsed` state. The minimap uses its own detail level.
+
+This does not guarantee constant-time rendering: the worst case remains O(N),
+particularly when many subtrees intersect the view. The model still owns
+individually allocated nodes; it does not yet provide a flat pool or a
+zero-copy adapter to your application's tree.
+
+### Tuning level of detail
+
+`RendererConfig::cluster_pixels` and `minimap_cluster_pixels` independently set
+the maximum projected subtree extent in pixels. Set either to zero to disable
+clustering in that view; `subtree_culling = false` disables offscreen subtree
+pruning.
+
+A cluster represents its subtree's root. Interaction events expose that node
+and `hovered_hidden_count` / `clicked_hidden_count`, the number of descendants
+hidden by clustering. Zooming in reveals them without modifying the model.
+
+Edge badges take priority: when enabled at the current zoom, the edge pass
+preserves even very long labels and disables canvas clustering. Labels, colors,
+and shapes can change without rebuilding this cache. After changing an edge's
+thickness, call `RefreshTreeVisualBounds(root)` or recompute the layout.
+
+`renderer.stats()` separates canvas, edge, hit-test, and minimap visits.
+Counters reset each render, so you can verify skipped work without relying
+on timing measurements.
+
+> **ImGui backend:** with 16-bit indices, enable
+> `ImGuiBackendFlags_RendererHasVtxOffset` (already supported by the demo's
+> OpenGL3 backend), or compile ImGui and its consumers with 32-bit indices.
+> The renderer refuses to draw if neither option is available.
+
+<details>
+<summary>Model and camera details</summary>
+
+- Children must be non-null. `add_child` rejects null pointers.
+  Editing an already laid-out tree, even through `add_child`, still requires
+  explicit relayout.
+- The model represents a tree, not a graph: unfold cycles and shared states
+  into separate occurrences. Identifiers are metadata and need not be unique.
+- Dimensions are uniform, in world units. Circles use the smaller dimension
+  as their diameter; `level_height` separates level centers.
+  The root is anchored at `(0,0)`, and bounds include visible shapes.
+- Camera pan is measured in canvas-local pixels. Setting the minimum zoom too
+  high may prevent fitting a large tree.
+- The mutable `fit_to_tree` overload initializes a fresh tree's layout.
+  The const overload fits existing coordinates without mutation; for a fresh
+  tree, it uses O(depth) temporary storage.
+
+</details>
+
+<details>
+<summary>Demo screenshots</summary>
+
+Both images come from the compiled demo running at 1440 x 900.
+The second uses `--collapse-first` to show collapsing and the inspector.
+On Linux, with `xvfb`, `xauth`, `xdotool`, and ImageMagick installed, this command
+captures the complete view (add `--collapse-first` for the other view):
 
 ```sh
+xvfb-run -a -s '-screen 0 1440x900x24' sh -c '
+  LIBGL_ALWAYS_SOFTWARE=1 ./build/imgui_tree_graph_demo --scene overview --view fit &
+  demo=$!
+  trap "kill $demo 2>/dev/null || true" EXIT
+  sleep 8
+  kill -0 "$demo" || exit 1
+  xdotool mousemove --sync 1439 899
+  sleep 1
+  import -window root docs/images/imgui-tree-graph-demo.png
+'
+```
+
+</details>
+
+<details>
+<summary>Tests and installation</summary>
+
+```sh
+ctest --test-dir build -C Release --output-on-failure
 cmake --install build --prefix /your/prefix
 ```
 
-L’installation fournit les en-têtes, la bibliothèque et l’export
-`lib/cmake/imgui_tree_graph/imgui_tree_graphTargets.cmake`. Les consommateurs de
-cet export doivent fournir les includes et le linkage de leur propre Dear ImGui,
-compilé avec une configuration ABI compatible (notamment `imconfig.h`).
-Pour construire la démo avec une cible ImGui externe, renseigner également
-`IMGUI_TREE_GRAPH_IMGUI_SOURCE_DIR` vers les sources correspondantes.
+Tests cover layout and rendering without an external framework. CI builds on
+Linux, Windows, and macOS, checks installation, and starts the demo under
+Xvfb/Mesa. A Linux job uses AddressSanitizer/UBSan.
+
+Installation exports `ImGuiTreeGraph::imgui_tree_graph` in
+`lib/cmake/imgui_tree_graph/imgui_tree_graphTargets.cmake`. Provide your own
+Dear ImGui includes and linkage with an ABI-compatible configuration.
+To build the demo with an external ImGui target, also set
+`IMGUI_TREE_GRAPH_IMGUI_SOURCE_DIR`.
+
+</details>

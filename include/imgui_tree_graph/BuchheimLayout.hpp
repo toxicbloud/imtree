@@ -44,7 +44,7 @@ struct BuchheimNode
     EdgeVisualData edge_from_parent;
     NodeShape shape = NodeShape::Circle;
     std::int8_t player_id = -1;
-    ImU32 fill_color = 0; // Zero selects the renderer's player palette.
+    ImU32 fill_color = 0; // Nonzero overrides the renderer's color callback and palette.
     ImU32 border_color = IM_COL32(180, 185, 195, 255);
     bool collapsed = false;
 
@@ -62,12 +62,24 @@ struct BuchheimNode
     BuchheimNode* ancestor = nullptr;
     std::size_t number = 1;
 
+    // Layout-owned, visible-subtree center bounds/count (collapsed descendants
+    // excluded). Do not edit; coordinates/topology/collapse changes need relayout.
+    ImVec2 subtree_min{};
+    ImVec2 subtree_max{};
+    std::size_t subtree_count = 1;
+    // Conservative maximum absolute edge thickness for the visible subtree.
+    float subtree_edge_thickness = 1.0f;
+
     BuchheimNode();
     explicit BuchheimNode(std::string primary_label);
     ~BuchheimNode();
     BuchheimNode(const BuchheimNode&) = delete;
     BuchheimNode& operator=(const BuchheimNode&) = delete;
 
+    // Transfers ownership; rejects null. Existing pointers remain stable. As with
+    // direct children edits, recompute layout after changing an already laid-out tree.
+    BuchheimNode& add_child(std::unique_ptr<BuchheimNode> child);
+    bool has_layout() const noexcept;
     bool is_leaf() const noexcept;
     BuchheimNode* left_sibling() const noexcept;
     BuchheimNode* leftmost_sibling() const noexcept;
@@ -76,11 +88,20 @@ struct BuchheimNode
 
 private:
     BuchheimNode* default_ancestor_ = nullptr;
+    bool layout_initialized_ = false;
     friend void ComputeBuchheimLayout(BuchheimNode*, const LayoutConfig&) noexcept;
 };
 
 // Coordinates denote node centers; the root is anchored at (0, 0).
 void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config = {}) noexcept;
+// Call with the rendering root after editing edge thickness on a laid-out tree;
+// O(N), allocation-free, no coordinate changes. Layout calls this automatically.
+// Labels, colors, shapes, and renderer node dimensions may change freely without
+// refreshing this cache. Font changes need no refresh either. Relayout is still
+// required for coordinate/tree edits and changes to layout spacing parameters.
+void RefreshTreeVisualBounds(BuchheimNode* root) noexcept;
+// Fits current coordinates without mutation. Fresh trees use O(depth) scratch;
+// laid-out trees use parent links with no allocations. Excludes collapsed children.
 void ComputeTreeAABB(const BuchheimNode* root, ImVec2& minimum, ImVec2& maximum,
                      const LayoutConfig& config = {}) noexcept;
 

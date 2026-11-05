@@ -47,6 +47,19 @@ void Validate(BuchheimNode& root, const LayoutConfig& config = {})
     std::map<float, std::vector<BuchheimNode*>> levels;
     for (BuchheimNode* node : Nodes(root))
     {
+        ImVec2 lo{node->x, node->y}, hi = lo;
+        std::size_t count = 1;
+        if (!node->collapsed)
+            for (const auto& child : node->children) {
+                lo.x = std::min(lo.x, child->subtree_min.x);
+                lo.y = std::min(lo.y, child->subtree_min.y);
+                hi.x = std::max(hi.x, child->subtree_max.x);
+                hi.y = std::max(hi.y, child->subtree_max.y);
+                count += child->subtree_count;
+            }
+        Check(node->subtree_count == count && Near(lo.x, node->subtree_min.x) &&
+              Near(lo.y, node->subtree_min.y) && Near(hi.x, node->subtree_max.x) &&
+              Near(hi.y, node->subtree_max.y), "cached visible subtree centers/count");
         levels[node->y].push_back(node);
         if (node->parent)
         {
@@ -102,6 +115,8 @@ void TestSimpleAndBounds()
     root.shape = NodeShape::Circle;
     ComputeBuchheimLayout(&root);
     ComputeTreeAABB(&root, minimum, maximum);
+    Check(root.subtree_count == 1 && Near(root.subtree_min.x, 0) &&
+          Near(root.subtree_max.y, 0), "collapsed cache excludes hidden descendants");
     Check(Near(minimum.x, -30) && Near(minimum.y, -30)
               && Near(maximum.x, 30) && Near(maximum.y, 30), "collapsed circle bounds");
     Check(root.is_leaf() && !root.leftmost_child() && !root.rightmost_child(), "collapsed helpers");
@@ -109,6 +124,49 @@ void TestSimpleAndBounds()
     ComputeBuchheimLayout(nullptr);
     ComputeTreeAABB(nullptr, minimum, maximum);
     Check(minimum.x == 0 && minimum.y == 0 && maximum.x == 0 && maximum.y == 0, "null bounds");
+}
+
+void TestOwnershipAndFreshBounds()
+{
+    BuchheimNode root;
+    auto owned = std::make_unique<BuchheimNode>("first");
+    auto* address = owned.get();
+    auto& first = root.add_child(std::move(owned));
+    auto& second = root.add_child(std::make_unique<BuchheimNode>("second"));
+    auto& grandchild = first.add_child(std::make_unique<BuchheimNode>());
+    Check(!owned && &first == address && first.parent == &root && first.number == 1,
+          "add_child transfers ownership without moving nodes");
+    Check(second.parent == &root && second.number == 2 && second.left_sibling() == &first,
+          "add_child maintains sibling indices");
+    Check(grandchild.parent == &first && grandchild.number == 1, "nested ownership links");
+    try
+    {
+        root.add_child(nullptr);
+        Check(false, "null add_child must throw");
+    }
+    catch (const std::invalid_argument&) {}
+    Check(root.children.size() == 2, "null add_child leaves tree unchanged");
+    // Legacy direct ownership edits must also be safe before layout, without
+    // mutating links, coordinates, or layout scratch through a const pointer.
+    auto* direct = Child(second);
+    direct->x = 300;
+    direct->y = 400;
+    ImVec2 lo, hi;
+    const BuchheimNode* const_root = &root;
+    ComputeTreeAABB(const_root, lo, hi);
+    Check(hi.x == 330 && hi.y == 430 && direct->parent == nullptr &&
+              !root.has_layout() && root.ancestor == nullptr, "fresh const ownership bounds");
+    second.collapsed = true;
+    ComputeTreeAABB(const_root, lo, hi);
+    Check(hi.x == 30 && hi.y == 30, "fresh const bounds skip collapsed descendants");
+    second.collapsed = false;
+    ComputeBuchheimLayout(&root);
+    Validate(root);
+    Check(root.has_layout() && direct->has_layout() && direct->parent == &second,
+          "layout marks and repairs all ownership");
+    root.children.erase(root.children.begin());
+    ComputeBuchheimLayout(&root);
+    Check(root.children.front()->number == 1, "legacy external edits remain supported");
 }
 
 void TestAsymmetricAndRepeatability()
@@ -186,9 +244,12 @@ void TestDeepAndWide()
     constexpr int depth = 100000;
     for (int i = 0; i < depth; ++i)
         node = Child(*node);
+    node->y = 1234;
+    ImVec2 minimum, maximum;
+    ComputeTreeAABB(static_cast<const BuchheimNode*>(&root), minimum, maximum);
+    Check(maximum.y == 1264 && node->parent == nullptr, "stack-safe fresh const bounds");
     ComputeBuchheimLayout(&root);
     Check(node->x == 0 && node->y == static_cast<float>(depth) * 110, "stack-safe deep layout");
-    ImVec2 minimum, maximum;
     ComputeTreeAABB(&root, minimum, maximum);
     Check(Near(minimum.x, -50) && maximum.y == node->y + 30, "stack-safe deep bounds");
     root.collapsed = true;
@@ -210,6 +271,7 @@ int main()
     try
     {
         TestSimpleAndBounds();
+        TestOwnershipAndFreshBounds();
         TestAsymmetricAndRepeatability();
         TestThreads();
         TestDeepAndWide();

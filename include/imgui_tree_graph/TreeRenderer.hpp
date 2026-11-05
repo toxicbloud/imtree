@@ -13,6 +13,28 @@ struct Camera {
     float zoom{1.0f};
 };
 
+// Borrowed pointers remain valid only while the caller owns the nodes. Reset on
+// every render, including empty/clipped canvases. Minimap input is not node input.
+struct NodeInteraction {
+    const BuchheimNode* hovered{nullptr};
+    const BuchheimNode* clicked{nullptr};
+    int mouse_button{-1}; // ImGuiMouseButton; -1 when no node was clicked.
+    bool double_clicked{false};
+    ImVec2 screen_position{};
+    ImVec2 world_position{};
+    bool ctrl{false}, shift{false}, alt{false}, super{false};
+    // Automatic clusters expose their original representative, never mutate
+    // collapsed, and report how many visible-layout descendants were hidden.
+    std::size_t hovered_hidden_count{0};
+    std::size_t clicked_hidden_count{0};
+};
+
+struct TraversalStats {
+    std::size_t main_nodes_visited{}, main_edges_visited{}, hit_nodes_visited{}, minimap_nodes_visited{};
+    std::size_t main_subtrees_culled{}, edge_subtrees_culled{}, hit_subtrees_culled{}, minimap_subtrees_culled{};
+    std::size_t main_clusters{}, minimap_clusters{};
+};
+
 struct RendererConfig {
     bool show_grid{true};
     bool show_minimap{true};
@@ -25,6 +47,17 @@ struct RendererConfig {
     float badge_zoom{0.45f};
     float detail_zoom{0.3f};
     ImU32 background{IM_COL32(23, 25, 30, 255)};
+    bool collapse_on_click{true};
+    // Called for visible main-canvas and minimap fills only when fill_color == 0.
+    // Keep callbacks allocation-free and do not mutate the tree during rendering.
+    ImU32 (*node_color)(const BuchheimNode&, void* user_data){nullptr};
+    void* node_color_user_data{nullptr};
+    // Maximum whole-subtree projected size in pixels; zero disables automatic
+    // clustering independently in each view. Main clusters are disabled whenever
+    // edge badges are enabled, since live labels can extend arbitrarily far.
+    float cluster_pixels{3.0f};
+    float minimap_cluster_pixels{2.0f};
+    bool subtree_culling{true};
 };
 
 // Keep one renderer per canvas. Compute the layout after externally changing the tree.
@@ -32,8 +65,19 @@ class TreeRenderer {
 public:
     [[nodiscard]] Camera& camera() noexcept;
     [[nodiscard]] const Camera& camera() const noexcept;
+    [[nodiscard]] const NodeInteraction& interaction() const noexcept;
+    // Reset each render. Counts tested roots, not descendants skipped by a prune.
+    [[nodiscard]] const TraversalStats& stats() const noexcept;
+    // Mutable overload lazily lays out fresh trees. Const overload only fits their
+    // current coordinates (never mutates), including an unlaid-out tree.
+    void fit_to_tree(BuchheimNode* root, ImVec2 canvas_size,
+                     const LayoutConfig& layout = {}) noexcept;
     void fit_to_tree(const BuchheimNode* root, ImVec2 canvas_size,
                      const LayoutConfig& layout = {}) noexcept;
+    void fit_to_tree(std::nullptr_t, ImVec2 canvas_size,
+                     const LayoutConfig& layout = {}) noexcept {
+        fit_to_tree(static_cast<const BuchheimNode*>(nullptr), canvas_size, layout);
+    }
     // Returns true if a node was collapsed/expanded. Layout is updated before drawing.
     bool render(std::string_view id, BuchheimNode* root,
                 const LayoutConfig& layout = {}, const RendererConfig& config = {});
@@ -41,6 +85,8 @@ public:
 private:
     Camera camera_{};
     bool minimap_dragging_{false};
+    NodeInteraction interaction_{};
+    TraversalStats stats_{};
 };
 
 } // namespace ImGuiTreeGraph

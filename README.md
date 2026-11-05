@@ -192,12 +192,13 @@ la vue complète (ajoutez `--collapse-first` pour l’autre vue) :
 
 ```sh
 xvfb-run -a -s '-screen 0 1440x900x24' sh -c '
-  xdotool mousemove 1439 899
   LIBGL_ALWAYS_SOFTWARE=1 ./build/imgui_tree_graph_demo --scene overview --view fit &
   demo=$!
   trap "kill $demo 2>/dev/null || true" EXIT
   sleep 8
   kill -0 "$demo" || exit 1
+  xdotool mousemove --sync 1439 899
+  sleep 1
   import -window root docs/images/imgui-tree-graph-demo.png
 '
 ```

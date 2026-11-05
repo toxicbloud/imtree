@@ -111,6 +111,49 @@ void TestSimpleAndBounds()
     Check(minimum.x == 0 && minimum.y == 0 && maximum.x == 0 && maximum.y == 0, "null bounds");
 }
 
+void TestOwnershipAndFreshBounds()
+{
+    BuchheimNode root;
+    auto owned = std::make_unique<BuchheimNode>("first");
+    auto* address = owned.get();
+    auto& first = root.add_child(std::move(owned));
+    auto& second = root.add_child(std::make_unique<BuchheimNode>("second"));
+    auto& grandchild = first.add_child(std::make_unique<BuchheimNode>());
+    Check(!owned && &first == address && first.parent == &root && first.number == 1,
+          "add_child transfers ownership without moving nodes");
+    Check(second.parent == &root && second.number == 2 && second.left_sibling() == &first,
+          "add_child maintains sibling indices");
+    Check(grandchild.parent == &first && grandchild.number == 1, "nested ownership links");
+    try
+    {
+        root.add_child(nullptr);
+        Check(false, "null add_child must throw");
+    }
+    catch (const std::invalid_argument&) {}
+    Check(root.children.size() == 2, "null add_child leaves tree unchanged");
+    // Legacy direct ownership edits must also be safe before layout, without
+    // mutating links, coordinates, or layout scratch through a const pointer.
+    auto* direct = Child(second);
+    direct->x = 300;
+    direct->y = 400;
+    ImVec2 lo, hi;
+    const BuchheimNode* const_root = &root;
+    ComputeTreeAABB(const_root, lo, hi);
+    Check(hi.x == 330 && hi.y == 430 && direct->parent == nullptr &&
+              !root.has_layout() && root.ancestor == nullptr, "fresh const ownership bounds");
+    second.collapsed = true;
+    ComputeTreeAABB(const_root, lo, hi);
+    Check(hi.x == 30 && hi.y == 30, "fresh const bounds skip collapsed descendants");
+    second.collapsed = false;
+    ComputeBuchheimLayout(&root);
+    Validate(root);
+    Check(root.has_layout() && direct->has_layout() && direct->parent == &second,
+          "layout marks and repairs all ownership");
+    root.children.erase(root.children.begin());
+    ComputeBuchheimLayout(&root);
+    Check(root.children.front()->number == 1, "legacy external edits remain supported");
+}
+
 void TestAsymmetricAndRepeatability()
 {
     for (unsigned seed = 0; seed < 80; ++seed)
@@ -186,9 +229,12 @@ void TestDeepAndWide()
     constexpr int depth = 100000;
     for (int i = 0; i < depth; ++i)
         node = Child(*node);
+    node->y = 1234;
+    ImVec2 minimum, maximum;
+    ComputeTreeAABB(static_cast<const BuchheimNode*>(&root), minimum, maximum);
+    Check(maximum.y == 1264 && node->parent == nullptr, "stack-safe fresh const bounds");
     ComputeBuchheimLayout(&root);
     Check(node->x == 0 && node->y == static_cast<float>(depth) * 110, "stack-safe deep layout");
-    ImVec2 minimum, maximum;
     ComputeTreeAABB(&root, minimum, maximum);
     Check(Near(minimum.x, -50) && maximum.y == node->y + 30, "stack-safe deep bounds");
     root.collapsed = true;
@@ -210,6 +256,7 @@ int main()
     try
     {
         TestSimpleAndBounds();
+        TestOwnershipAndFreshBounds();
         TestAsymmetricAndRepeatability();
         TestThreads();
         TestDeepAndWide();

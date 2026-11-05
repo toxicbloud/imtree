@@ -25,18 +25,20 @@ Rect Around(ImVec2 p, float x, float y) noexcept {
 }
 
 // Parent links and sibling indices are established by ComputeBuchheimLayout.
-const BuchheimNode* Next(const BuchheimNode* n, const BuchheimNode* root) noexcept {
+template<class Node>
+Node* Next(Node* n, const BuchheimNode* root) noexcept {
     if (!n->is_leaf()) return n->children.front().get();
     while (n != root) {
-        const auto* parent = n->parent;
+        auto* parent = n->parent;
         if (n->number < parent->children.size()) return parent->children[n->number].get();
         n = parent;
     }
     return nullptr;
 }
 
-ImU32 Fill(const BuchheimNode& n) noexcept {
+ImU32 Fill(const BuchheimNode& n, const RendererConfig& config) {
     if (n.fill_color != 0) return n.fill_color;
+    if (config.node_color) return config.node_color(n, config.node_color_user_data);
     switch (n.player_id) {
     case 0: return IM_COL32(52, 126, 190, 255);
     case 1: return IM_COL32(185, 71, 66, 255);
@@ -136,7 +138,8 @@ Overview MakeOverview(Rect canvas, const BuchheimNode* root,
 }
 
 void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
-                  Rect viewport, ImVec2 origin, const Camera& camera) {
+                  Rect viewport, ImVec2 origin, const Camera& camera,
+                  const RendererConfig& config) {
     dl->AddRectFilled(map.box.min, map.box.max, IM_COL32(16, 18, 23, 240), 4);
     dl->PushClipRect(map.box.min, map.box.max, true);
     const Rect clip{{std::max(map.box.min.x, viewport.min.x), std::max(map.box.min.y, viewport.min.y)},
@@ -149,7 +152,7 @@ void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
                             {std::max(a.x, p.x) + 0.5f, std::max(a.y, p.y) + 0.5f}};
             if (Intersects(edge, clip)) dl->AddLine(a, p, IM_COL32(150, 155, 165, 140));
         }
-        if (Intersects(Around(p, 2, 2), clip)) dl->AddCircleFilled(p, 2, Fill(*n), 6);
+        if (Intersects(Around(p, 2, 2), clip)) dl->AddCircleFilled(p, 2, Fill(*n, config), 6);
     }
     const ImVec2 a = map.project({(viewport.min.x - origin.x - camera.pan.x) / camera.zoom,
                                   (viewport.min.y - origin.y - camera.pan.y) / camera.zoom});
@@ -169,6 +172,13 @@ void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
 
 Camera& TreeRenderer::camera() noexcept { return camera_; }
 const Camera& TreeRenderer::camera() const noexcept { return camera_; }
+const NodeInteraction& TreeRenderer::interaction() const noexcept { return interaction_; }
+
+void TreeRenderer::fit_to_tree(BuchheimNode* root, ImVec2 size,
+                              const LayoutConfig& layout) noexcept {
+    if (root && !root->has_layout()) ComputeBuchheimLayout(root, layout);
+    fit_to_tree(static_cast<const BuchheimNode*>(root), size, layout);
+}
 
 void TreeRenderer::fit_to_tree(const BuchheimNode* root, ImVec2 size,
                               const LayoutConfig& layout) noexcept {
@@ -183,6 +193,8 @@ void TreeRenderer::fit_to_tree(const BuchheimNode* root, ImVec2 size,
 
 bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                           const LayoutConfig& layout, const RendererConfig& config) {
+    interaction_ = {};
+    if (root && !root->has_layout()) ComputeBuchheimLayout(root, layout);
     // Large trees can exceed 64K vertices even when only their mini-map is visible.
     if (root && sizeof(ImDrawIdx) == 2 &&
         !(ImGui::GetIO().BackendFlags & ImGuiBackendFlags_RendererHasVtxOffset)) {
@@ -235,8 +247,15 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                        local.y - (local.y - camera_.pan.y) * camera_.zoom / previous};
     }
     bool changed = false;
-    if (hovered && !over_map && !minimap_dragging_ && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        for (auto* n = root; n; n = const_cast<BuchheimNode*>(Next(n, root))) {
+    if (hovered && !over_map && !minimap_dragging_ && Contains(viewport, io.MousePos)) {
+        interaction_.screen_position = io.MousePos;
+        interaction_.world_position = {(io.MousePos.x - origin.x - camera_.pan.x) / camera_.zoom,
+                                       (io.MousePos.y - origin.y - camera_.pan.y) / camera_.zoom};
+        interaction_.ctrl = io.KeyCtrl;
+        interaction_.shift = io.KeyShift;
+        interaction_.alt = io.KeyAlt;
+        interaction_.super = io.KeySuper;
+        for (auto* n = root; n; n = Next(n, root)) {
             const ImVec2 p = Screen(Position(*n), origin, camera_);
             const float hw = layout.node_width * camera_.zoom * 0.5f;
             const float hh = layout.node_height * camera_.zoom * 0.5f;
@@ -244,11 +263,22 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
             const float radius = std::min(hw, hh);
             const bool hit = n->shape == NodeShape::Circle ? dx * dx + dy * dy <= radius * radius
                                                           : Contains(Around(p, hw, hh), io.MousePos);
-            if (hit && !n->children.empty()) {
-                n->collapsed = !n->collapsed;
-                ComputeBuchheimLayout(root, layout);
-                changed = true;
-                map = MakeOverview(canvas, root, layout, config);
+            if (hit) {
+                interaction_.hovered = n;
+                for (int button = ImGuiMouseButton_Left; button <= ImGuiMouseButton_Middle; ++button) {
+                    if (!ImGui::IsMouseClicked(button)) continue;
+                    interaction_.clicked = n;
+                    interaction_.mouse_button = button;
+                    interaction_.double_clicked = ImGui::IsMouseDoubleClicked(button);
+                    break;
+                }
+                if (config.collapse_on_click && !n->children.empty() &&
+                    interaction_.mouse_button == ImGuiMouseButton_Left) {
+                    n->collapsed = !n->collapsed;
+                    ComputeBuchheimLayout(root, layout);
+                    changed = true;
+                    map = MakeOverview(canvas, root, layout, config);
+                }
                 break;
             }
         }
@@ -300,10 +330,10 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
         if (!Intersects(stroke, viewport)) continue;
         const bool detail = zoom >= config.detail_zoom;
         if (n->shape == NodeShape::Circle) {
-            dl->AddCircleFilled(p, radius, Fill(*n), detail ? 32 : 8);
+            dl->AddCircleFilled(p, radius, Fill(*n, config), detail ? 32 : 8);
             if (detail) dl->AddCircle(p, radius, n->border_color, 32, 2 * zoom);
         } else {
-            dl->AddRectFilled(bounds.min, bounds.max, Fill(*n), detail ? 6 * zoom : 0);
+            dl->AddRectFilled(bounds.min, bounds.max, Fill(*n, config), detail ? 6 * zoom : 0);
             if (detail) dl->AddRect(bounds.min, bounds.max, n->border_color, 6 * zoom, 0, 2 * zoom);
         }
         if (zoom >= config.text_zoom) {
@@ -326,7 +356,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
         }
     }
     if (config.show_minimap && Intersects(map.box, viewport))
-        DrawOverview(dl, root, map, viewport, origin, camera_);
+        DrawOverview(dl, root, map, viewport, origin, camera_, config);
     dl->PopClipRect();
     ImGui::PopID();
     return changed;

@@ -23,7 +23,7 @@ std::unique_ptr<ImGuiTreeGraph::BuchheimNode> MakeTree(int depth, int max_depth,
     node->edge_from_parent.label = depth % 2 == 0 ? "p=0.65" : "a=" + std::to_string(node->id % 3);
     if (depth < max_depth) {
         const int count = depth % 2 == 0 ? 3 : 2;
-        for (int i = 0; i < count; ++i) node->children.push_back(MakeTree(depth + 1, max_depth, next_id));
+        for (int i = 0; i < count; ++i) node->add_child(MakeTree(depth + 1, max_depth, next_id));
     }
     return node;
 }
@@ -77,6 +77,7 @@ int main(int argc, char** argv) {
     ImGuiTreeGraph::ComputeBuchheimLayout(tree.get(), layout);
     ImGuiTreeGraph::TreeRenderer renderer;
     ImGuiTreeGraph::RendererConfig config;
+    const ImGuiTreeGraph::BuchheimNode* selected = nullptr;
     bool first_frame = true;
     int frames = 0;
     while (!glfwWindowShouldClose(window) && (frame_limit == 0 || frames < frame_limit)) {
@@ -98,12 +99,19 @@ int main(int argc, char** argv) {
         }
         ImGui::SameLine(); ImGui::Checkbox("Grid", &config.show_grid);
         ImGui::SameLine(); ImGui::Checkbox("Mini-map", &config.show_minimap);
+        ImGui::SameLine(); ImGui::Checkbox("Click collapses", &config.collapse_on_click);
         ImGui::SameLine(); ImGui::Text("Zoom %.2f", renderer.camera().zoom);
+        if (selected)
+            ImGui::Text("Selected #%u: %s | %s", selected->id, selected->primary_label.c_str(),
+                        selected->secondary_label.c_str());
+        else
+            ImGui::TextUnformatted("Click any node to inspect it.");
         if (first_frame) {
             renderer.camera().pan = {ImGui::GetContentRegionAvail().x * 0.5f, 90};
             first_frame = false;
         }
         renderer.render("mcts", tree.get(), layout, config);
+        if (renderer.interaction().clicked) selected = renderer.interaction().clicked;
         ImGui::End();
         ImGui::Render();
         int width, height;

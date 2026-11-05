@@ -3,6 +3,13 @@
 Bibliothèque C++20 de visualisation d’arbres de recherche pour Dear ImGui :
 MCTS, minimax, décisions et états/actions. Namespace `ImGuiTreeGraph`.
 
+![Capture du rendu Dear ImGui de l’addon : arbre MCTS et mini-map](docs/images/imgui-tree-graph-demo.png)
+
+Cette image est une capture PNG de la démo C++ compilée et exécutée avec
+Dear ImGui, GLFW et OpenGL (Mesa sous Xvfb), pas une illustration générée.
+Elle montre la vue détaillée initiale de l’arbre ; la mini-map représente
+l’ensemble de ses neuf niveaux.
+
 ## Compilation et démo
 
 Prérequis : CMake ≥ 3.24, Git, compilateur C++20 et pilote OpenGL ≥ 3.2.
@@ -35,6 +42,26 @@ alternance des joueurs, nœuds chance, métriques et probabilités.
 - Boutons « Fit entire tree » et « Root (1:1) » : vue globale ou détaillée.
 - `--frames 5` : test de démarrage borné, utilisable avec Xvfb.
 
+### Reproduire la capture du README
+
+Après compilation, sous Linux, installer `xvfb`, `xauth` et `imagemagick`,
+puis lancer depuis la racine du dépôt :
+
+```sh
+mkdir -p docs/images
+xvfb-run -a -s '-screen 0 1440x900x24' sh -c '
+  LIBGL_ALWAYS_SOFTWARE=1 ./build/imgui_tree_graph_demo &
+  demo=$!
+  trap "kill $demo 2>/dev/null || true" EXIT
+  sleep 8
+  kill -0 "$demo" || exit 1
+  import -window root docs/images/imgui-tree-graph-demo.png
+'
+```
+
+Le PNG est capturé directement sur l’écran virtuel pendant que la démo tourne,
+sans redessiner ni reconstituer son interface.
+
 ## Intégration
 
 ```cmake
@@ -56,7 +83,7 @@ auto child = std::make_unique<BuchheimNode>();
 child->shape = NodeShape::RoundedRectangle;
 child->secondary_label = "N=42\nQ=0.7";
 child->edge_from_parent.label = "p=0.8";
-root->children.push_back(std::move(child));
+root->add_child(std::move(child));
 LayoutConfig layout;
 ComputeBuchheimLayout(root.get(), layout);
 TreeRenderer renderer; // persistant, un par canvas
@@ -67,13 +94,19 @@ renderer.render("search", root.get(), layout);
 
 Les structures possèdent les chaînes (`std::string`) et les enfants
 (`std::unique_ptr`). Les pointeurs parent, contours et indices sont non propriétaires
-et recalculés automatiquement. Un arbre est requis : les graphes avec cycles ou
+et recalculés par le layout. `add_child` transfère la propriété, refuse un enfant
+nul et établit immédiatement son parent et son indice. Un arbre est requis : les graphes avec cycles ou
 états partagés doivent être déroulés en occurrences distinctes. Les identifiants
 sont des métadonnées ; aucune unicité n’est requise pour le rendu.
 
 Après une modification structurelle ou des paramètres de layout, appeler
 `ComputeBuchheimLayout` avant le rendu. Le repliage par le renderer le fait
-automatiquement. Conserver le modèle pendant le rendu, sans modification concurrente.
+automatiquement. Pour un arbre neuf, `render` et la surcharge mutable de
+`fit_to_tree` calculent le premier layout automatiquement. La surcharge prenant
+un arbre constant ne le modifie jamais et cadre ses coordonnées actuelles ;
+sur un arbre neuf, ce parcours utilise un stockage temporaire O(profondeur).
+Après modification d’un arbre déjà calculé, même via `add_child`, le recalcul
+explicite reste nécessaire. Conserver le modèle pendant le rendu, sans modification concurrente.
 Les dimensions sont uniformes, en unités monde ; un cercle utilise la plus petite
 dimension comme diamètre. `level_height` est la distance entre centres de niveaux :
 choisir une valeur supérieure à `node_height` pour laisser de la place aux arêtes.
@@ -82,8 +115,19 @@ La racine est ancrée à `(0,0)`. Les bornes incluent les dimensions des nœuds 
 `RendererConfig` configure la grille, la taille et les quatre coins de mini-map,
 les limites de zoom et les seuils LOD. `camera()` expose pan (pixels locaux du
 canvas) et zoom. `fit_to_tree` ajuste la caméra aux dimensions disponibles.
-`fill_color == 0` sélectionne la palette J1/J2/chance ; toute autre couleur
-`ImU32` remplace cette palette.
+`fill_color == 0` sélectionne `RendererConfig::node_color(node, user_data)` si
+ce callback est renseigné, sinon la palette J1/J2/chance. Toute autre couleur
+`ImU32` est prioritaire. Le callback et `node_color_user_data` s’appliquent
+au canvas et à la mini-map ; ils permettent notamment une palette multi-joueurs.
+Le callback ne doit ni modifier l’arbre ni allouer pour conserver les garanties
+du rendu.
+
+Après chaque `render`, `renderer.interaction()` expose les nœuds survolé et
+cliqué, le bouton, le double-clic, les modificateurs et les positions écran/monde.
+Les feuilles sont également sélectionnables. `collapse_on_click = false`
+désactive le repliage pour réserver le clic à un inspecteur personnalisé.
+Ces événements sont réinitialisés à chaque rendu ; leurs pointeurs empruntés
+ne doivent pas survivre aux nœuds. La démo affiche les données du nœud sélectionné.
 
 ## Architecture et performances
 
@@ -113,6 +157,18 @@ agrandir lorsqu’un nouveau maximum de géométrie est atteint ; l’absence
 d’allocations s’entend **en régime établi après préchauffage**. La création du
 modèle et des chaînes se fait hors rendu. Textes/badges disparaissent par paliers
 de zoom et les formes/arêtes sont simplifiées à faible zoom.
+
+### Limites actuelles pour les arbres de recherche
+
+- Le modèle possède ses nœuds, chaînes et vecteurs d’enfants. Copier un arbre
+  MCTS dans ce modèle a un coût de mémoire et d’allocations à la construction,
+  distinct de l’absence d’allocations du rendu après préchauffage. Il n’existe
+  pas encore de pool plat ni d’adaptateur zéro copie vers un arbre externe.
+- Le LOD simplifie la géométrie et masque textes/cartouches ; il ne regroupe
+  pas les sous-arbres denses en clusters. Le culling évite les primitives hors
+  écran, mais pas le parcours des nœuds visibles structurellement, y compris
+  pour la mini-map. Il ne garantit donc pas un temps proportionnel au seul
+  nombre de nœuds affichés à l’écran.
 
 Avec les indices ImGui 16 bits par défaut, le backend doit annoncer
 `ImGuiBackendFlags_RendererHasVtxOffset` (c’est le cas du backend OpenGL3 de la

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <stdexcept>
 
 namespace ImGuiTreeGraph
 {
@@ -11,6 +12,22 @@ BuchheimNode::BuchheimNode() = default;
 BuchheimNode::BuchheimNode(std::string primary_label)
     : primary_label(std::move(primary_label))
 {
+}
+
+BuchheimNode& BuchheimNode::add_child(std::unique_ptr<BuchheimNode> child)
+{
+    if (!child)
+        throw std::invalid_argument("BuchheimNode::add_child requires a non-null child");
+    children.push_back(std::move(child));
+    BuchheimNode& added = *children.back();
+    added.parent = this;
+    added.number = children.size();
+    return added;
+}
+
+bool BuchheimNode::has_layout() const noexcept
+{
+    return layout_initialized_;
 }
 
 BuchheimNode::~BuchheimNode()
@@ -177,6 +194,7 @@ void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config) noexc
         node->x = node->y = node->prelim = node->mod = node->shift = node->change = 0.0f;
         node->thread = nullptr;
         node->ancestor = node;
+        node->layout_initialized_ = true;
         node->default_ancestor_ = node->children.empty() ? nullptr : node->children.front().get();
         for (std::size_t i = 0; i < node->children.size(); ++i)
         {
@@ -256,6 +274,11 @@ void ComputeTreeAABB(const BuchheimNode* root, ImVec2& minimum, ImVec2& maximum,
         return;
 
     const BuchheimNode* node = root;
+    // A genuinely const fresh tree has no usable back-links. Only this fallback
+    // needs scratch storage; laid-out per-frame bounds remain allocation-free.
+    struct Pending { const BuchheimNode* node; std::size_t next; };
+    std::vector<Pending> pending;
+    const bool ownership_walk = !root->has_layout();
     bool first = true;
     while (node)
     {
@@ -277,7 +300,24 @@ void ComputeTreeAABB(const BuchheimNode* root, ImVec2& minimum, ImVec2& maximum,
         }
         if (!node->is_leaf())
         {
+            if (ownership_walk)
+                pending.push_back({node, 1});
             node = node->leftmost_child();
+            continue;
+        }
+        if (ownership_walk)
+        {
+            node = nullptr;
+            while (!pending.empty())
+            {
+                auto& frame = pending.back();
+                if (frame.next < frame.node->children.size())
+                {
+                    node = frame.node->children[frame.next++].get();
+                    break;
+                }
+                pending.pop_back();
+            }
             continue;
         }
         while (node != root && node->number == node->parent->children.size())

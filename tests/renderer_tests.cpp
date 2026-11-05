@@ -4,6 +4,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <new>
+
+namespace { std::size_t cpp_allocations = 0; }
+
+void* operator new(std::size_t size) {
+    ++cpp_allocations;
+    if (void* p = std::malloc(size ? size : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return ::operator new(size); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 namespace {
 using namespace ImGuiTreeGraph;
@@ -48,6 +62,151 @@ FrameResult Frame(TreeRenderer& renderer, BuchheimNode* root,
     return {origin, size, vertices, changed};
 }
 
+struct ColorProbe {
+    int calls[3]{};
+};
+
+ImU32 CustomColor(const BuchheimNode& node, void* data) {
+    auto& probe = *static_cast<ColorProbe*>(data);
+    Check(node.id < 3, "callback receives original node");
+    ++probe.calls[node.id];
+    return IM_COL32(7, 19, 233, 255);
+}
+
+int ColorVertices(ImU32 color) {
+    int count = 0;
+    const auto* draw = ImGui::GetDrawData();
+    for (int i = 0; i < draw->CmdListsCount; ++i)
+        for (const auto& vertex : draw->CmdLists[i]->VtxBuffer)
+            if (vertex.col == color) ++count;
+    return count;
+}
+
+void TestNewAPI() {
+    auto& io = ImGui::GetIO();
+    LayoutConfig layout;
+    RendererConfig config;
+    config.show_grid = false;
+    config.show_minimap = false;
+    TreeRenderer renderer;
+    auto root = std::make_unique<BuchheimNode>("root");
+    root->children.push_back(std::make_unique<BuchheimNode>("leaf"));
+    root->children.push_back(std::make_unique<BuchheimNode>("leaf"));
+    renderer.camera().pan = {260, 100};
+    Frame(renderer, root.get(), layout, config);
+    const auto frame = Frame(renderer, root.get(), layout, config);
+    Check(root->has_layout() && root->children[1]->parent == root.get() &&
+          root->children[1]->number == 2 && root->children[1]->y == layout.level_height,
+          "render must lazily layout legacy fresh trees");
+
+    auto fresh = std::make_unique<BuchheimNode>();
+    auto* tip = fresh.get();
+    for (int i = 0; i < 100000; ++i)
+        tip = &tip->add_child(std::make_unique<BuchheimNode>());
+    renderer.fit_to_tree(fresh.get(), frame.size, layout);
+    Check(fresh->has_layout() && tip->y == 100000.0f * layout.level_height,
+          "mutable fit must lazily layout deep fresh trees");
+    Frame(renderer, fresh.get(), layout, config);
+    renderer.fit_to_tree(nullptr, frame.size);
+    Check(std::isfinite(renderer.camera().pan.x), "null fit overload must be unambiguous");
+    auto const_fresh = std::make_unique<BuchheimNode>();
+    const_fresh->children.push_back(std::make_unique<BuchheimNode>());
+    const_fresh->children.front()->x = 400;
+    renderer.fit_to_tree(static_cast<const BuchheimNode*>(const_fresh.get()), frame.size, layout);
+    Check(!const_fresh->has_layout() && const_fresh->children.front()->parent == nullptr &&
+          const_fresh->children.front()->x == 400 && renderer.camera().zoom > 0,
+          "const fresh fit must not mutate topology or coordinates");
+
+    renderer.camera() = {{260, 100}, 1};
+    config.collapse_on_click = false;
+    io.AddMousePosEvent(frame.origin.x + 260, frame.origin.y + 100);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().hovered == root.get() && !renderer.interaction().clicked,
+          "hover events include nonclicked nodes");
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Check(!Frame(renderer, root.get(), layout, config).changed && !root->collapsed,
+          "collapse can be disabled independently of clicks");
+    const auto event = renderer.interaction();
+    Check(event.clicked == root.get() && event.mouse_button == ImGuiMouseButton_Left &&
+          event.ctrl && Near(event.world_position.x, 0) && Near(event.world_position.y, 0) &&
+          Near(event.screen_position.x, frame.origin.x + 260), "rich click event");
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().clicked, "click events reset on the next render");
+    auto* leaf = root->children.front().get();
+    io.AddMousePosEvent(frame.origin.x + 260 + leaf->x, frame.origin.y + 100 + leaf->y);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Right, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf &&
+          renderer.interaction().mouse_button == ImGuiMouseButton_Right,
+          "leaf and right-button clicks are reported");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Right, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf && !leaf->collapsed,
+          "left-clicking a leaf reports selection without changing layout");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(renderer.interaction().clicked == leaf && renderer.interaction().double_clicked,
+          "double clicks are exposed to custom inspectors");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMousePosEvent(frame.origin.x + frame.size.x - 20, frame.origin.y + frame.size.y - 20);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().hovered, "empty canvas clears hovered nodes");
+    Frame(renderer, nullptr, layout, config);
+    Check(!renderer.interaction().hovered && !renderer.interaction().clicked,
+          "null render clears interaction");
+
+    root->id = 0;
+    root->children[0]->id = 1;
+    root->children[1]->id = 2;
+    root->player_id = 0;
+    root->children[0]->player_id = 1;
+    root->children[1]->player_id = -1;
+    config.show_minimap = true;
+    Frame(renderer, root.get(), layout, config);
+    Check(ColorVertices(IM_COL32(52, 126, 190, 255)) > 0 &&
+          ColorVertices(IM_COL32(185, 71, 66, 255)) > 0 &&
+          ColorVertices(IM_COL32(95, 128, 112, 255)) > 0,
+          "default player palette remains unchanged");
+    ColorProbe probe;
+    config.node_color = CustomColor;
+    config.node_color_user_data = &probe;
+    Frame(renderer, root.get(), layout, config);
+    Check(probe.calls[0] == 2 && probe.calls[1] == 2 && probe.calls[2] == 2 &&
+          ColorVertices(IM_COL32(7, 19, 233, 255)) > 0,
+          "custom colors override every player palette on canvas and minimap");
+    probe = {};
+    root->fill_color = IM_COL32(251, 3, 91, 255);
+    Frame(renderer, root.get(), layout, config);
+    Check(probe.calls[0] == 0 && probe.calls[1] == 2 && probe.calls[2] == 2 &&
+          ColorVertices(root->fill_color) > 0, "explicit fill overrides callback in both views");
+    for (int i = 0; i < 4; ++i) Frame(renderer, root.get(), layout, config);
+    const auto before = allocations;
+    const auto cpp_before = cpp_allocations;
+    Frame(renderer, root.get(), layout, config);
+    Check(before == allocations && cpp_before == cpp_allocations,
+          "custom interaction and color rendering does not allocate");
+    const ImVec2 map_center{frame.origin.x + frame.size.x - config.minimap_margin - 100,
+                            frame.origin.y + frame.size.y - config.minimap_margin - 75};
+    io.AddMousePosEvent(map_center.x, map_center.y);
+    Frame(renderer, root.get(), layout, config);
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+    Frame(renderer, root.get(), layout, config);
+    Check(!renderer.interaction().hovered && !renderer.interaction().clicked,
+          "minimap interactions must not leak node events");
+    io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+    io.AddMousePosEvent(-100, -100);
+    Frame(renderer, nullptr, layout, config);
+}
+
 } // namespace
 
 int main() {
@@ -63,6 +222,7 @@ int main() {
     unsigned char* pixels;
     int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    TestNewAPI();
 
     LayoutConfig layout;
     RendererConfig config;
@@ -185,9 +345,11 @@ int main() {
     Check(large_map.vertices > 65535, "large minimap must handle vertex-offset draw commands");
     for (int i = 0; i < 4; ++i) Frame(renderer, wide.get(), default_layout, config);
     const auto warmed_allocations = allocations;
+    const auto warmed_cpp_allocations = cpp_allocations;
     Frame(renderer, wide.get(), default_layout, config);
     Frame(renderer, wide.get(), default_layout, config);
-    Check(allocations == warmed_allocations, "steady-state rendering must not allocate");
+    Check(allocations == warmed_allocations && cpp_allocations == warmed_cpp_allocations,
+          "steady-state rendering must not allocate");
     io.BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
     Frame(renderer, root.get(), layout, config);
     ImGui::DestroyContext();

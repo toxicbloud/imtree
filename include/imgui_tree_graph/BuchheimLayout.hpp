@@ -44,7 +44,7 @@ struct BuchheimNode
     EdgeVisualData edge_from_parent;
     NodeShape shape = NodeShape::Circle;
     std::int8_t player_id = -1;
-    ImU32 fill_color = 0; // Zero selects the renderer's player palette.
+    ImU32 fill_color = 0; // Nonzero overrides the renderer's color callback and palette.
     ImU32 border_color = IM_COL32(180, 185, 195, 255);
     bool collapsed = false;
 
@@ -68,6 +68,10 @@ struct BuchheimNode
     BuchheimNode(const BuchheimNode&) = delete;
     BuchheimNode& operator=(const BuchheimNode&) = delete;
 
+    // Transfers ownership; rejects null. Existing pointers remain stable. As with
+    // direct children edits, recompute layout after changing an already laid-out tree.
+    BuchheimNode& add_child(std::unique_ptr<BuchheimNode> child);
+    bool has_layout() const noexcept;
     bool is_leaf() const noexcept;
     BuchheimNode* left_sibling() const noexcept;
     BuchheimNode* leftmost_sibling() const noexcept;
@@ -76,11 +80,14 @@ struct BuchheimNode
 
 private:
     BuchheimNode* default_ancestor_ = nullptr;
+    bool layout_initialized_ = false;
     friend void ComputeBuchheimLayout(BuchheimNode*, const LayoutConfig&) noexcept;
 };
 
 // Coordinates denote node centers; the root is anchored at (0, 0).
 void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config = {}) noexcept;
+// Fits current coordinates without mutation. Fresh trees use O(depth) scratch;
+// laid-out trees use parent links with no allocations. Excludes collapsed children.
 void ComputeTreeAABB(const BuchheimNode* root, ImVec2& minimum, ImVec2& maximum,
                      const LayoutConfig& config = {}) noexcept;
 

@@ -313,7 +313,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                 continue;
             }
             const bool cluster = camera_.zoom < config.badge_zoom &&
-                Cluster(*n, camera_.zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
+                Cluster(*n, camera_.zoom, layout, config.cluster_pixels, n->subtree_edge_thickness);
             const ImVec2 p = Screen(Position(*n), origin, camera_);
             const float hw = layout.node_width * camera_.zoom * 0.5f;
             const float hh = layout.node_height * camera_.zoom * 0.5f;
@@ -354,12 +354,12 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
         const auto* n = cursor;
         ++stats_.main_edges_visited;
         const bool cluster = zoom < config.badge_zoom &&
-            Cluster(*n, zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
+            Cluster(*n, zoom, layout, config.cluster_pixels, n->subtree_edge_thickness);
         cursor = Next(n, root, cluster);
         // Badges are independent visuals with mutable, potentially unbounded
         // labels. Never prune their pass while badges are enabled.
         if (config.subtree_culling && zoom < config.badge_zoom &&
-            std::isfinite(root->subtree_edge_thickness)) {
+            std::isfinite(n->subtree_edge_thickness)) {
             Rect bounds = Subtree(*n, origin, camera_, layout);
             if (n != root) {
                 const auto p = Screen(Position(*n->parent), origin, camera_);
@@ -368,7 +368,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                 bounds.max.x = std::max(bounds.max.x, p.x + layout.node_width * zoom);
                 bounds.max.y = std::max(bounds.max.y, p.y + layout.node_height * zoom);
             }
-            const float pad = std::max(0.5f, root->subtree_edge_thickness * zoom) + 1;
+            const float pad = std::max(0.5f, n->subtree_edge_thickness * zoom) + 1;
             if (!Intersects(Expand(bounds, pad, pad), viewport)) {
                 ++stats_.edge_subtrees_culled;
                 cursor = Next(n, root, true);
@@ -414,7 +414,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
             continue;
         }
         const bool cluster = zoom < config.badge_zoom &&
-            Cluster(*n, zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
+            Cluster(*n, zoom, layout, config.cluster_pixels, n->subtree_edge_thickness);
         cursor = Next(n, root, cluster);
         if (cluster) {
             ++stats_.main_clusters;

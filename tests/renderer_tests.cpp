@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <memory>
 #include <new>
+#include <limits>
 #include <vector>
 
 namespace { std::size_t cpp_allocations = 0; }
@@ -275,6 +276,46 @@ void TestConservativeVisuals() {
     Check(compare() > empty.vertices, "live shapes and dimensions remain conservative without relayout");
 }
 
+void TestLocalStrokeBounds() {
+    BuchheimNode root;
+    auto& thick = root.add_child(std::make_unique<BuchheimNode>());
+    auto& dense = root.add_child(std::make_unique<BuchheimNode>());
+    for (int i = 0; i < 3; ++i) dense.add_child(std::make_unique<BuchheimNode>());
+    auto* tail = &root.add_child(std::make_unique<BuchheimNode>());
+    for (int i = 0; i < 512; ++i)
+        tail = &tail->add_child(std::make_unique<BuchheimNode>());
+    LayoutConfig layout;
+    layout.level_height = 10000;
+    thick.edge_from_parent.thickness = 1.0e9f;
+    // Transparent edges emit no geometry even for the nonfinite-bound case.
+    thick.edge_from_parent.color = 0;
+    ComputeBuchheimLayout(&root, layout);
+    RendererConfig config;
+    config.show_grid = config.show_minimap = false;
+    config.cluster_pixels = 30;
+    TreeRenderer renderer;
+    renderer.camera() = {{260, 100}, 0.001f};
+    auto frame = Frame(renderer, &root, layout, config);
+    auto& io = ImGui::GetIO();
+    io.AddMousePosEvent(frame.origin.x + 260 + dense.x * 0.001f,
+                        frame.origin.y + 100 + dense.y * 0.001f);
+    auto verify = [&] {
+        Frame(renderer, &root, layout, config);
+        Check(dense.subtree_edge_thickness == 1 && renderer.stats().main_clusters == 1 &&
+              renderer.stats().main_edges_visited < 100 &&
+              renderer.stats().edge_subtrees_culled > 0 &&
+              renderer.interaction().hovered == &dense &&
+              renderer.interaction().hovered_hidden_count == 3,
+              "unrelated wide/nonfinite edge cannot block local clustering, hit LOD, or pruning");
+    };
+    verify();
+    thick.edge_from_parent.thickness = std::numeric_limits<float>::infinity();
+    RefreshTreeVisualBounds(&root);
+    Check(std::isinf(root.subtree_edge_thickness), "nonfinite bound propagates only through ancestors");
+    verify();
+    io.AddMousePosEvent(-100, -100);
+}
+
 void TestNewAPI() {
     auto& io = ImGui::GetIO();
     LayoutConfig layout;
@@ -429,6 +470,7 @@ int main() {
     TestNewAPI();
     TestAcceleration();
     TestConservativeVisuals();
+    TestLocalStrokeBounds();
 
     LayoutConfig layout;
     RendererConfig config;

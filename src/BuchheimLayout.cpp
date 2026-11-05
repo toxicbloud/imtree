@@ -1,6 +1,7 @@
 #include "imgui_tree_graph/BuchheimLayout.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <stdexcept>
 
@@ -192,6 +193,9 @@ void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config) noexc
     while (node)
     {
         node->x = node->y = node->prelim = node->mod = node->shift = node->change = 0.0f;
+        node->subtree_min = node->subtree_max = ImVec2(0, 0);
+        node->subtree_count = 1;
+        node->subtree_edge_thickness = 1.0f;
         node->thread = nullptr;
         node->ancestor = node;
         node->layout_initialized_ = true;
@@ -249,6 +253,8 @@ void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config) noexc
     {
         node->x = node->prelim + modifier - root_prelim;
         node->y = static_cast<float>(depth) * config.level_height;
+        node->subtree_min = node->subtree_max = ImVec2(node->x, node->y);
+        node->subtree_count = 1;
         if (!node->is_leaf())
         {
             modifier += node->mod;
@@ -258,10 +264,46 @@ void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config) noexc
         }
         while (node != root && node->number == node->parent->children.size())
         {
+            auto* p = node->parent;
+            p->subtree_min.x = std::min(p->subtree_min.x, node->subtree_min.x);
+            p->subtree_min.y = std::min(p->subtree_min.y, node->subtree_min.y);
+            p->subtree_max.x = std::max(p->subtree_max.x, node->subtree_max.x);
+            p->subtree_max.y = std::max(p->subtree_max.y, node->subtree_max.y);
+            p->subtree_count += node->subtree_count;
             node = node->parent;
             modifier -= node->mod;
             --depth;
         }
+        if (node != root) {
+            auto* p = node->parent;
+            p->subtree_min.x = std::min(p->subtree_min.x, node->subtree_min.x);
+            p->subtree_min.y = std::min(p->subtree_min.y, node->subtree_min.y);
+            p->subtree_max.x = std::max(p->subtree_max.x, node->subtree_max.x);
+            p->subtree_max.y = std::max(p->subtree_max.y, node->subtree_max.y);
+            p->subtree_count += node->subtree_count;
+        }
+        node = node == root ? nullptr : node->parent->children[node->number].get();
+    }
+    RefreshTreeVisualBounds(root);
+}
+
+void RefreshTreeVisualBounds(BuchheimNode* root) noexcept
+{
+    if (!root || !root->has_layout()) return;
+    // Postorder reduction, without a stack. Nonfinite thickness disables pruning.
+    auto* node = root;
+    while (node) {
+        const float width = std::abs(node->edge_from_parent.thickness);
+        node->subtree_edge_thickness = std::isfinite(width) ? width : INFINITY;
+        if (!node->is_leaf()) { node = node->leftmost_child(); continue; }
+        while (node != root && node->number == node->parent->children.size()) {
+            auto* p = node->parent;
+            p->subtree_edge_thickness = std::max(p->subtree_edge_thickness, node->subtree_edge_thickness);
+            node = p;
+        }
+        if (node != root)
+            node->parent->subtree_edge_thickness =
+                std::max(node->parent->subtree_edge_thickness, node->subtree_edge_thickness);
         node = node == root ? nullptr : node->parent->children[node->number].get();
     }
 }

@@ -26,8 +26,8 @@ Rect Around(ImVec2 p, float x, float y) noexcept {
 
 // Parent links and sibling indices are established by ComputeBuchheimLayout.
 template<class Node>
-Node* Next(Node* n, const BuchheimNode* root) noexcept {
-    if (!n->is_leaf()) return n->children.front().get();
+Node* Next(Node* n, const BuchheimNode* root, bool skip = false) noexcept {
+    if (!skip && !n->is_leaf()) return n->children.front().get();
     while (n != root) {
         auto* parent = n->parent;
         if (n->number < parent->children.size()) return parent->children[n->number].get();
@@ -52,6 +52,26 @@ ImVec2 Screen(ImVec2 world, ImVec2 origin, const Camera& camera) noexcept {
 }
 
 ImVec2 Position(const BuchheimNode& n) noexcept { return {n.x, n.y}; }
+
+Rect Expand(Rect r, float x, float y) noexcept {
+    return {{r.min.x - x, r.min.y - y}, {r.max.x + x, r.max.y + y}};
+}
+
+Rect Subtree(const BuchheimNode& n, ImVec2 origin, const Camera& camera,
+             const LayoutConfig& layout) noexcept {
+    // Shapes/dimensions remain live. Include outlines, AA fringe, cluster marker,
+    // and the collapsed marker even for very narrow/tiny node dimensions.
+    return Expand({Screen(n.subtree_min, origin, camera), Screen(n.subtree_max, origin, camera)},
+                  std::max(4.0f, (layout.node_width * 0.5f + 4) * camera.zoom) + 1,
+                  std::max(4.0f, (layout.node_height * 0.5f + 4) * camera.zoom) + 1);
+}
+
+bool Cluster(const BuchheimNode& n, float scale, const LayoutConfig& layout,
+             float pixels, float thickness = 0) noexcept {
+    return pixels > 0 && n.subtree_count >= 4 &&
+        (n.subtree_max.x - n.subtree_min.x + layout.node_width + 2 * thickness) * scale <= pixels &&
+        (n.subtree_max.y - n.subtree_min.y + layout.node_height + 2 * thickness) * scale <= pixels;
+}
 
 void Text(ImDrawList* dl, ImVec2 center, std::string_view text, float size,
           ImU32 color, Rect clip) {
@@ -127,8 +147,15 @@ Overview MakeOverview(Rect canvas, const BuchheimNode* root,
                      config.minimap_corner == MinimapCorner::TopRight;
     const ImVec2 pos{left ? canvas.min.x + margin : canvas.max.x - margin - width,
                      top ? canvas.min.y + margin : canvas.max.y - margin - height};
-    ImVec2 lo, hi;
-    ComputeTreeAABB(root, lo, hi, layout);
+    // Centers were reduced once at layout time. Current dimensions may change
+    // without relayout; a rectangle envelope conservatively covers all shapes.
+    ImVec2 lo{}, hi{};
+    if (root) {
+        lo = {root->subtree_min.x - layout.node_width * 0.5f,
+              root->subtree_min.y - layout.node_height * 0.5f};
+        hi = {root->subtree_max.x + layout.node_width * 0.5f,
+              root->subtree_max.y + layout.node_height * 0.5f};
+    }
     lo.x -= 20; lo.y -= 20; hi.x += 20; hi.y += 20;
     const float scale = std::min(width / std::max(1.0f, hi.x - lo.x),
                                  height / std::max(1.0f, hi.y - lo.y));
@@ -139,12 +166,29 @@ Overview MakeOverview(Rect canvas, const BuchheimNode* root,
 
 void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
                   Rect viewport, ImVec2 origin, const Camera& camera,
-                  const RendererConfig& config) {
+                  const LayoutConfig& layout, const RendererConfig& config, TraversalStats& stats) {
     dl->AddRectFilled(map.box.min, map.box.max, IM_COL32(16, 18, 23, 240), 4);
     dl->PushClipRect(map.box.min, map.box.max, true);
     const Rect clip{{std::max(map.box.min.x, viewport.min.x), std::max(map.box.min.y, viewport.min.y)},
                     {std::min(map.box.max.x, viewport.max.x), std::min(map.box.max.y, viewport.max.y)}};
-    for (const auto* n = root; n; n = Next(n, root)) {
+    for (const auto* n = root; n;) {
+        ++stats.minimap_nodes_visited;
+        // Include this subtree's incoming edge, not just its node centers.
+        Rect subtree{map.project(n->subtree_min), map.project(n->subtree_max)};
+        if (n != root) {
+            const auto parent = map.project(Position(*n->parent));
+            subtree.min.x = std::min(subtree.min.x, parent.x);
+            subtree.min.y = std::min(subtree.min.y, parent.y);
+            subtree.max.x = std::max(subtree.max.x, parent.x);
+            subtree.max.y = std::max(subtree.max.y, parent.y);
+        }
+        if (config.subtree_culling && !Intersects(Expand(subtree, 3, 3), clip)) {
+            ++stats.minimap_subtrees_culled;
+            n = Next(n, root, true);
+            continue;
+        }
+        const bool cluster = Cluster(*n, map.scale, layout, config.minimap_cluster_pixels);
+        if (cluster) ++stats.minimap_clusters;
         const ImVec2 p = map.project(Position(*n));
         if (n != root) {
             const ImVec2 a = map.project(Position(*n->parent));
@@ -152,7 +196,10 @@ void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
                             {std::max(a.x, p.x) + 0.5f, std::max(a.y, p.y) + 0.5f}};
             if (Intersects(edge, clip)) dl->AddLine(a, p, IM_COL32(150, 155, 165, 140));
         }
-        if (Intersects(Around(p, 2, 2), clip)) dl->AddCircleFilled(p, 2, Fill(*n, config), 6);
+        const float radius = cluster ? 3.0f : 2.0f;
+        if (Intersects(Around(p, radius, radius), clip))
+            dl->AddCircleFilled(p, radius, Fill(*n, config), 6);
+        n = Next(n, root, cluster);
     }
     const ImVec2 a = map.project({(viewport.min.x - origin.x - camera.pan.x) / camera.zoom,
                                   (viewport.min.y - origin.y - camera.pan.y) / camera.zoom});
@@ -173,6 +220,7 @@ void DrawOverview(ImDrawList* dl, const BuchheimNode* root, const Overview& map,
 Camera& TreeRenderer::camera() noexcept { return camera_; }
 const Camera& TreeRenderer::camera() const noexcept { return camera_; }
 const NodeInteraction& TreeRenderer::interaction() const noexcept { return interaction_; }
+const TraversalStats& TreeRenderer::stats() const noexcept { return stats_; }
 
 void TreeRenderer::fit_to_tree(BuchheimNode* root, ImVec2 size,
                               const LayoutConfig& layout) noexcept {
@@ -194,6 +242,7 @@ void TreeRenderer::fit_to_tree(const BuchheimNode* root, ImVec2 size,
 bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                           const LayoutConfig& layout, const RendererConfig& config) {
     interaction_ = {};
+    stats_ = {};
     if (root && !root->has_layout()) ComputeBuchheimLayout(root, layout);
     // Large trees can exceed 64K vertices even when only their mini-map is visible.
     if (root && sizeof(ImDrawIdx) == 2 &&
@@ -255,24 +304,36 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
         interaction_.shift = io.KeyShift;
         interaction_.alt = io.KeyAlt;
         interaction_.super = io.KeySuper;
-        for (auto* n = root; n; n = Next(n, root)) {
+        for (auto* n = root; n;) {
+            ++stats_.hit_nodes_visited;
+            if (config.subtree_culling &&
+                !Contains(Subtree(*n, origin, camera_, layout), io.MousePos)) {
+                ++stats_.hit_subtrees_culled;
+                n = Next(n, root, true);
+                continue;
+            }
+            const bool cluster = camera_.zoom < config.badge_zoom &&
+                Cluster(*n, camera_.zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
             const ImVec2 p = Screen(Position(*n), origin, camera_);
             const float hw = layout.node_width * camera_.zoom * 0.5f;
             const float hh = layout.node_height * camera_.zoom * 0.5f;
             const float dx = io.MousePos.x - p.x, dy = io.MousePos.y - p.y;
             const float radius = std::min(hw, hh);
-            const bool hit = n->shape == NodeShape::Circle ? dx * dx + dy * dy <= radius * radius
-                                                          : Contains(Around(p, hw, hh), io.MousePos);
+            const bool hit = cluster ? dx * dx + dy * dy <= 16 :
+                (n->shape == NodeShape::Circle ? dx * dx + dy * dy <= radius * radius
+                                               : Contains(Around(p, hw, hh), io.MousePos));
             if (hit) {
                 interaction_.hovered = n;
+                interaction_.hovered_hidden_count = cluster ? n->subtree_count - 1 : 0;
                 for (int button = ImGuiMouseButton_Left; button <= ImGuiMouseButton_Middle; ++button) {
                     if (!ImGui::IsMouseClicked(button)) continue;
                     interaction_.clicked = n;
+                    interaction_.clicked_hidden_count = interaction_.hovered_hidden_count;
                     interaction_.mouse_button = button;
                     interaction_.double_clicked = ImGui::IsMouseDoubleClicked(button);
                     break;
                 }
-                if (config.collapse_on_click && !n->children.empty() &&
+                if (!cluster && config.collapse_on_click && !n->children.empty() &&
                     interaction_.mouse_button == ImGuiMouseButton_Left) {
                     n->collapsed = !n->collapsed;
                     ComputeBuchheimLayout(root, layout);
@@ -281,6 +342,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
                 }
                 break;
             }
+            n = Next(n, root, cluster);
         }
     }
     dl->PushClipRect(viewport.min, viewport.max, true);
@@ -288,7 +350,32 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
     if (config.show_grid) Grid(dl, viewport, origin, camera_);
     const float zoom = camera_.zoom;
     // Edges first so node fills cover their endpoints.
-    for (const auto* n = root; n; n = Next(n, root)) {
+    for (const auto* cursor = root; cursor;) {
+        const auto* n = cursor;
+        ++stats_.main_edges_visited;
+        const bool cluster = zoom < config.badge_zoom &&
+            Cluster(*n, zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
+        cursor = Next(n, root, cluster);
+        // Badges are independent visuals with mutable, potentially unbounded
+        // labels. Never prune their pass while badges are enabled.
+        if (config.subtree_culling && zoom < config.badge_zoom &&
+            std::isfinite(root->subtree_edge_thickness)) {
+            Rect bounds = Subtree(*n, origin, camera_, layout);
+            if (n != root) {
+                const auto p = Screen(Position(*n->parent), origin, camera_);
+                bounds.min.x = std::min(bounds.min.x, p.x - layout.node_width * zoom);
+                bounds.min.y = std::min(bounds.min.y, p.y - layout.node_height * zoom);
+                bounds.max.x = std::max(bounds.max.x, p.x + layout.node_width * zoom);
+                bounds.max.y = std::max(bounds.max.y, p.y + layout.node_height * zoom);
+            }
+            const float pad = std::max(0.5f, root->subtree_edge_thickness * zoom) + 1;
+            if (!Intersects(Expand(bounds, pad, pad), viewport)) {
+                ++stats_.edge_subtrees_culled;
+                cursor = Next(n, root, true);
+                continue;
+            }
+        }
+        // Keep the representative's incoming edge when collapsing its internals.
         if (n == root) continue;
         ImVec2 a = Screen(Position(*n->parent), origin, camera_);
         ImVec2 b = Screen(Position(*n), origin, camera_);
@@ -318,7 +405,24 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
             }
         }
     }
-    for (const auto* n = root; n; n = Next(n, root)) {
+    for (const auto* cursor = root; cursor;) {
+        const auto* n = cursor;
+        ++stats_.main_nodes_visited;
+        if (config.subtree_culling && !Intersects(Subtree(*n, origin, camera_, layout), viewport)) {
+            ++stats_.main_subtrees_culled;
+            cursor = Next(n, root, true);
+            continue;
+        }
+        const bool cluster = zoom < config.badge_zoom &&
+            Cluster(*n, zoom, layout, config.cluster_pixels, root->subtree_edge_thickness);
+        cursor = Next(n, root, cluster);
+        if (cluster) {
+            ++stats_.main_clusters;
+            const auto p = Screen(Position(*n), origin, camera_);
+            if (Intersects(Around(p, 4, 4), viewport))
+                dl->AddCircleFilled(p, 4, Fill(*n, config), 8);
+            continue;
+        }
         const ImVec2 p = Screen(Position(*n), origin, camera_);
         const float hw = layout.node_width * zoom * 0.5f;
         const float hh = layout.node_height * zoom * 0.5f;
@@ -356,7 +460,7 @@ bool TreeRenderer::render(std::string_view id, BuchheimNode* root,
         }
     }
     if (config.show_minimap && Intersects(map.box, viewport))
-        DrawOverview(dl, root, map, viewport, origin, camera_, config);
+        DrawOverview(dl, root, map, viewport, origin, camera_, layout, config, stats_);
     dl->PopClipRect();
     ImGui::PopID();
     return changed;

@@ -23,6 +23,16 @@ struct NodeInteraction {
     ImVec2 screen_position{};
     ImVec2 world_position{};
     bool ctrl{false}, shift{false}, alt{false}, super{false};
+    // Automatic clusters expose their original representative, never mutate
+    // collapsed, and report how many visible-layout descendants were hidden.
+    std::size_t hovered_hidden_count{0};
+    std::size_t clicked_hidden_count{0};
+};
+
+struct TraversalStats {
+    std::size_t main_nodes_visited{}, main_edges_visited{}, hit_nodes_visited{}, minimap_nodes_visited{};
+    std::size_t main_subtrees_culled{}, edge_subtrees_culled{}, hit_subtrees_culled{}, minimap_subtrees_culled{};
+    std::size_t main_clusters{}, minimap_clusters{};
 };
 
 struct RendererConfig {
@@ -42,6 +52,12 @@ struct RendererConfig {
     // Keep callbacks allocation-free and do not mutate the tree during rendering.
     ImU32 (*node_color)(const BuchheimNode&, void* user_data){nullptr};
     void* node_color_user_data{nullptr};
+    // Maximum whole-subtree projected size in pixels; zero disables automatic
+    // clustering independently in each view. Main clusters are disabled whenever
+    // edge badges are enabled, since live labels can extend arbitrarily far.
+    float cluster_pixels{3.0f};
+    float minimap_cluster_pixels{2.0f};
+    bool subtree_culling{true};
 };
 
 // Keep one renderer per canvas. Compute the layout after externally changing the tree.
@@ -50,6 +66,8 @@ public:
     [[nodiscard]] Camera& camera() noexcept;
     [[nodiscard]] const Camera& camera() const noexcept;
     [[nodiscard]] const NodeInteraction& interaction() const noexcept;
+    // Reset each render. Counts tested roots, not descendants skipped by a prune.
+    [[nodiscard]] const TraversalStats& stats() const noexcept;
     // Mutable overload lazily lays out fresh trees. Const overload only fits their
     // current coordinates (never mutates), including an unlaid-out tree.
     void fit_to_tree(BuchheimNode* root, ImVec2 canvas_size,
@@ -68,6 +86,7 @@ private:
     Camera camera_{};
     bool minimap_dragging_{false};
     NodeInteraction interaction_{};
+    TraversalStats stats_{};
 };
 
 } // namespace ImGuiTreeGraph

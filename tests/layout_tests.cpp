@@ -47,6 +47,19 @@ void Validate(BuchheimNode& root, const LayoutConfig& config = {})
     std::map<float, std::vector<BuchheimNode*>> levels;
     for (BuchheimNode* node : Nodes(root))
     {
+        ImVec2 lo{node->x, node->y}, hi = lo;
+        std::size_t count = 1;
+        if (!node->collapsed)
+            for (const auto& child : node->children) {
+                lo.x = std::min(lo.x, child->subtree_min.x);
+                lo.y = std::min(lo.y, child->subtree_min.y);
+                hi.x = std::max(hi.x, child->subtree_max.x);
+                hi.y = std::max(hi.y, child->subtree_max.y);
+                count += child->subtree_count;
+            }
+        Check(node->subtree_count == count && Near(lo.x, node->subtree_min.x) &&
+              Near(lo.y, node->subtree_min.y) && Near(hi.x, node->subtree_max.x) &&
+              Near(hi.y, node->subtree_max.y), "cached visible subtree centers/count");
         levels[node->y].push_back(node);
         if (node->parent)
         {
@@ -102,6 +115,8 @@ void TestSimpleAndBounds()
     root.shape = NodeShape::Circle;
     ComputeBuchheimLayout(&root);
     ComputeTreeAABB(&root, minimum, maximum);
+    Check(root.subtree_count == 1 && Near(root.subtree_min.x, 0) &&
+          Near(root.subtree_max.y, 0), "collapsed cache excludes hidden descendants");
     Check(Near(minimum.x, -30) && Near(minimum.y, -30)
               && Near(maximum.x, 30) && Near(maximum.y, 30), "collapsed circle bounds");
     Check(root.is_leaf() && !root.leftmost_child() && !root.rightmost_child(), "collapsed helpers");

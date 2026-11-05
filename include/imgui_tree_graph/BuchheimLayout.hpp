@@ -62,6 +62,14 @@ struct BuchheimNode
     BuchheimNode* ancestor = nullptr;
     std::size_t number = 1;
 
+    // Layout-owned, visible-subtree center bounds/count (collapsed descendants
+    // excluded). Do not edit; coordinates/topology/collapse changes need relayout.
+    ImVec2 subtree_min{};
+    ImVec2 subtree_max{};
+    std::size_t subtree_count = 1;
+    // Conservative maximum absolute edge thickness for the visible subtree.
+    float subtree_edge_thickness = 1.0f;
+
     BuchheimNode();
     explicit BuchheimNode(std::string primary_label);
     ~BuchheimNode();
@@ -86,6 +94,12 @@ private:
 
 // Coordinates denote node centers; the root is anchored at (0, 0).
 void ComputeBuchheimLayout(BuchheimNode* root, const LayoutConfig& config = {}) noexcept;
+// Call with the rendering root after editing edge thickness on a laid-out tree;
+// O(N), allocation-free, no coordinate changes. Layout calls this automatically.
+// Labels, colors, shapes, and renderer node dimensions may change freely without
+// refreshing this cache. Font changes need no refresh either. Relayout is still
+// required for coordinate/tree edits and changes to layout spacing parameters.
+void RefreshTreeVisualBounds(BuchheimNode* root) noexcept;
 // Fits current coordinates without mutation. Fresh trees use O(depth) scratch;
 // laid-out trees use parent links with no allocations. Excludes collapsed children.
 void ComputeTreeAABB(const BuchheimNode* root, ImVec2& minimum, ImVec2& maximum,
